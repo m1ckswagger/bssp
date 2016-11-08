@@ -51,7 +51,9 @@ static struct file_operations mydev_fcalls = {
 typedef struct my_cdev {
 	char *buffer;						// zeigt auf den buffer mit 1024 bytes
 	int current_length;	
+	int write_counter;
 	struct semaphore sync;	// zum sync der daten im device
+	dev_t dev_num;					// entspricht u32 bzw uint32_t
 	// wird vom kernel benoetigt
 	struct cdev cdev;
 } my_cdev_t;
@@ -91,8 +93,10 @@ static int __init cdrv_init(void)
 		// Zuweisung der file operations ans device
 		cdev_init(&my_devs[i].cdev, &mydev_fcalls);
 		my_devs[i].cdev.owner = THIS_MODULE;
+		my_devs[i].dev_num = cur_devnr;
 		my_devs[i].current_length = 0;
 		my_devs[i].buffer = NULL;
+		my_devs[i].write_counter = 0;
 
 		// initialisieren des semaphors
 		sema_init(&my_devs[i].sync, 1);
@@ -136,37 +140,81 @@ static int mydev_open(struct inode *inode, struct file *filp) {
 	// damit spaeter bei read und write auf dev zugegriffen werden kann (weil spaeter 
 	// inode nicht als parameter uebergeben werden kann)
 	filp->private_data = dev;
-
-	if(down_interruptible(&dev->sync)) {
-		return -ERESTARTSYS;
+	if (filp->f_mode & FMODE_READ) {		// FMODE_READ --> mit lesen geoeffnet
+		if (!dev->buffer) {
+			return -EPERM;
+		}
 	}
+	else if (filp->f_mode & FMODE_WRITE) {		// FMODE_WRITE --> mit schreiben geoeffnet
+		
+		// ueberpruefung ob gerade gelesen wird
+		if (dev->write_counter != 0) {
+			return -EBUSY;
+		}	
+		// sperren des Semaphores
+		if(down_interruptible(&dev->sync)) {
+			return -ERESTARTSYS;
+		}
 
-	// aufs device kann zugegriffen werden --- start
-
-	if (filp->f_mode & FMODE_WRITE) {		// FMODE_READ --> mit lesen geoeffnet
-		// mit schreiben geoeffnet
+		// aufs device kann zugegriffen werden --- start
+		dev->write_counter = 1;
+		// zuweisen des speichers wenn dieser noch nicht vorhanden
+		if (!dev->buffer) {
+			dev->buffer = kmalloc(BUFFER_SIZE, GFP_KERNEL);
+		}	
+		
+		// freigeben des Semaphores
+		up(&dev->sync);
 	}
-
-
-	// zuweisen des speichers wenn dieser noch nicht vorhanden
-	if(!dev->buffer) {
-		dev->buffer = kmalloc(BUFFER_SIZE, GFP_KERNEL);
-	}	
-	
-	up(&dev->sync);
 	return 0;
 }
 
 static int mydev_release(struct inode *inode, struct file *filp) {
 	my_cdev_t *dev = filp->private_data;
-	pr_info("TODO close\n");
+	
+	if (down_interruptible(&dev->sync)) {
+		return -ERESTARTSYS;
+	}
+	
+	// zuruecksetzen des write_counters
+	dev->write_counter = 0;
+	pr_info("dev %d closed\n", MINOR(dev->dev_num));
+
+	up(&dev->sync);
+	
 	return 0;
 }
 
 static ssize_t mydev_read(struct file *filp, char __user *buff, size_t count, loff_t *offset){
-	pr_info("TODO read\n");
 	my_cdev_t *dev = filp->private_data;
-	return 0;
+	int allowed_count;
+	int to_copy;
+	int not_copied;
+
+	if (down_interruptible(&dev->sync)) {
+		return -ERESTARTSYS;
+	}
+
+	allowed_count = dev->current_length;
+	to_copy = (allowed_count < count) ? allowed_count : count;
+
+	pr_info("dev %d to_copy: %d\n", MINOR(dev->dev_num), to_copy);
+	pr_info("dev %d current_length: %d\n", MINOR(dev->dev_num), dev->current_length);
+	pr_info("dev %d offset: %lld\n", MINOR(dev->dev_num), *offset);
+
+	// ueberpruefen von eof
+	if (*offset >= dev->current_length) {
+		up(&dev->sync);
+		return 0;
+	}
+
+	// copy_to_user liefert die anzahl der bytes, die nicht gelesen werden konnten
+	not_copied = copy_to_user(buff, dev->buffer + *offset, to_copy);
+	*offset = to_copy - not_copied;	// position nach dem read;
+	
+	up(&dev->sync);
+
+	return *offset;
 }
 
 static ssize_t mydev_write(struct file *filp, const char __user *buff, size_t count, loff_t *offset) {
@@ -199,7 +247,7 @@ static ssize_t mydev_write(struct file *filp, const char __user *buff, size_t co
  
 static long mydev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
 	pr_info("TODO ioctl\n");
-	my_cdev_t *dev = filp->private_data;
+	//my_cdev_t *dev = filp->private_data;
 	return 0;
 } 
 
