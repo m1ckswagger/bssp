@@ -162,6 +162,7 @@ static int mydev_open(struct inode *inode, struct file *filp) {
 		if (!dev->buffer) {
 			dev->buffer = kmalloc(BUFFER_SIZE, GFP_KERNEL);
 		}	
+		pr_info("dev %d opened\n", MINOR(dev->dev_num));
 		
 		// freigeben des Semaphores
 		up(&dev->sync);
@@ -242,6 +243,9 @@ static ssize_t mydev_write(struct file *filp, const char __user *buff, size_t co
 	}
 
 	*offset += (to_copy - not_copied);
+
+	up(&dev->sync);	
+
 	return to_copy - not_copied;
 }
  
