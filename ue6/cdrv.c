@@ -137,26 +137,24 @@ static int mydev_open(struct inode *inode, struct file *filp) {
 	// pointer auf die eigene struktur (my_cdev_t) wird mit containe_of berechnet
 	my_cdev_t *dev = container_of(inode->i_cdev, my_cdev_t, cdev);
 	
+	// sperren des Semaphores
+	if(down_interruptible(&dev->sync)) {
+		return -ERESTARTSYS;
+	}
 	// damit spaeter bei read und write auf dev zugegriffen werden kann (weil spaeter 
 	// inode nicht als parameter uebergeben werden kann)
 	filp->private_data = dev;
-	if (filp->f_mode & FMODE_READ) {		// FMODE_READ --> mit lesen geoeffnet
-		if (!dev->buffer) {
-			return -EPERM;
-		}
-	}
-	else if (filp->f_mode & FMODE_WRITE) {		// FMODE_WRITE --> mit schreiben geoeffnet
+	
+	if (filp->f_mode & FMODE_WRITE) {		// FMODE_WRITE --> mit schreiben geoeffnet
 		
 		// ueberpruefung ob gerade gelesen wird
 		if (dev->write_counter != 0) {
+			up(&dev->sync);
 			return -EBUSY;
 		}	
-		// sperren des Semaphores
-		if(down_interruptible(&dev->sync)) {
-			return -ERESTARTSYS;
-		}
+		
 
-		// aufs device kann zugegriffen werden --- start
+		// aufs device kann zugegriffen werden 
 		dev->write_counter = 1;
 		// zuweisen des speichers wenn dieser noch nicht vorhanden
 		if (!dev->buffer) {
@@ -164,9 +162,15 @@ static int mydev_open(struct inode *inode, struct file *filp) {
 		}	
 		pr_info("dev %d opened\n", MINOR(dev->dev_num));
 		
-		// freigeben des Semaphores
-		up(&dev->sync);
 	}
+	else if (filp->f_mode & FMODE_READ) {		// FMODE_READ --> mit lesen geoeffnet
+		if (!dev->buffer) {
+			up(&dev->sync);		
+			return -EPERM;
+		}
+	}
+	// freigeben des Semaphores
+	up(&dev->sync);
 	return 0;
 }
 
