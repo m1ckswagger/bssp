@@ -1,3 +1,5 @@
+# is151002
+
 CFLAGS=-Wall
 
 all: mish thread_mish 
