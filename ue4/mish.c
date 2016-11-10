@@ -23,6 +23,7 @@
 #define MAXARGS 200
 #define BUFSZ 1024
 #define PORT 5006
+#define SEM_NAME "/is151002_sem"
 
 void signal_handler(int sig);
 void reset_signal();
@@ -45,6 +46,7 @@ int handle_commands(char **argvec, int argc, time_t start_time, int background, 
 char pwd[MAXPATHNAME];
 char *user_name;
 struct utsname uname_data;
+static sem_t *sem;
 
 int main(int argc, char **argv) {
 
@@ -111,6 +113,11 @@ void start_shellserver() {
 
   struct sockaddr s_addr;
   struct sockaddr_in ss_addr;
+
+	if ((sem = sem_open(SEM_NAME, O_RDWR | O_CREAT, 0600, 1)) == SEM_FAILED) {
+		perror(SEM_NAME);
+		exit(1);
+	}
 
   ss_addr.sin_addr.s_addr = INADDR_ANY;
   ss_addr.sin_port = htons(PORT);
@@ -261,6 +268,7 @@ int handle_commands(char **argvec, int argc, time_t start_time, int background, 
     }
 	}
 
+	sem_wait(sem);
 	if((log_fd = open(log_path, O_RDWR|O_APPEND)) == -1) {
 		perror("open log");
 		fflush(stdout);
@@ -280,6 +288,8 @@ int handle_commands(char **argvec, int argc, time_t start_time, int background, 
 		write(log_fd, " ", 1);
 	}
 	write(log_fd, "\n", 1);
+	sem_post(sem);
+	close(log_fd);
   return 0;
 }
 
@@ -337,7 +347,8 @@ void handle_getprot(char **argvec, int argc, char *log_path) {
     fprintf(stderr, "getprot: wrong number of arguments!\n");
     return;
   }
- 
+
+	sem_wait(sem);
   n = strtol(argvec[1], NULL, 10);
   log = fopen(log_path, "r");
   while (fgets(line, sizeof(line), log)) {
@@ -356,6 +367,7 @@ void handle_getprot(char **argvec, int argc, char *log_path) {
     }
   }
 	fflush(stdout);
+	sem_post(sem);
 }
 
 void handle_cd(char **argvec, const unsigned argc) {
@@ -433,8 +445,6 @@ void clean_up_child_process() {
 
   while ((pid = waitpid(-1, &status, 0)) != -1)
     ;
-
-  // printf("child process ended\n");
 }
 
 void reset_signal() {
