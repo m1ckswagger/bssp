@@ -10,12 +10,14 @@
 #include <sys/stat.h>
 #include <sys/utsname.h>
 #include <sys/socket.h>
+#include <arpa/inet.h>
 
 #include <signal.h>
 #include <errno.h>
 #include <time.h>
 #include <netinet/in.h>
 #include <fcntl.h>
+#include <semaphore.h>
 
 #define MAXCMDLINE 2048
 #define MAXPATHNAME 2048
@@ -52,7 +54,8 @@ int main(int argc, char **argv) {
 
   char cmdline[MAXCMDLINE];
   char *argvec[MAXARGS];
-  int i, ss_pid, background;
+  int i, ss_pid;
+	//int background;
 
   // set start time
   time_t start_time;
@@ -80,7 +83,7 @@ int main(int argc, char **argv) {
 
   for(;;) {
 
-    background = 1; // true
+    //background = 1; // true
 
     // Prompt
     show_prompt();
@@ -95,7 +98,7 @@ int main(int argc, char **argv) {
     get_commands(cmdline, argvec, &i);
 
     // is background ?
-    background = is_background(argvec, i);
+    //background = is_background(argvec, i);
 
     // shell interne behandeln und durchführen
     //if(handle_commands(argvec, i, start_time, background) == 1) {

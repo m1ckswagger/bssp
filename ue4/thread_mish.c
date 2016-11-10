@@ -10,6 +10,7 @@
 #include <sys/stat.h>
 #include <sys/utsname.h>
 #include <sys/socket.h>
+#include <arpa/inet.h>
 
 #include <signal.h>
 #include <errno.h>
@@ -235,7 +236,8 @@ int handle_commands(char **argvec, int argc, time_t start_time, int background, 
         }
     }
 	}
-
+	
+	pthread_mutex_lock(&mutex);
 	if((log_fd = open(log_path, O_RDWR|O_APPEND)) == -1) {
 		perror("open log");
 		fflush(stdout);
@@ -247,7 +249,6 @@ int handle_commands(char **argvec, int argc, time_t start_time, int background, 
 		fflush(stdout);
 	}
 	*/
-	pthread_mutex_lock(&mutex);
 	for(i = 0; i < argc; i++) {
 		//write(log_fd, ipv4, strlen(ipv4));
 		//write(log_fd, ":", 1);
@@ -255,6 +256,7 @@ int handle_commands(char **argvec, int argc, time_t start_time, int background, 
 		write(log_fd, " ", 1);
 	}
 	write(log_fd, "\n", 1);
+	close(log_fd);
 	pthread_mutex_unlock(&mutex);
   return 0;
 }
