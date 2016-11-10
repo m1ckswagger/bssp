@@ -18,6 +18,8 @@
 #include <linux/module.h>
 #include <linux/slab.h>
 
+#include "my_ioctl.h"
+
 MODULE_LICENSE("Dual BSD/GPL");
 
 #define DRVNAME KBUILD_MODNAME
@@ -51,7 +53,8 @@ static struct file_operations mydev_fcalls = {
 typedef struct my_cdev {
 	char *buffer;						// zeigt auf den buffer mit 1024 bytes
 	int current_length;	
-	int write_counter;
+	int write_opened;
+	int read_count;
 	struct semaphore sync;	// zum sync der daten im device
 	dev_t dev_num;					// entspricht u32 bzw uint32_t
 	// wird vom kernel benoetigt
@@ -96,8 +99,8 @@ static int __init cdrv_init(void)
 		my_devs[i].dev_num = cur_devnr;
 		my_devs[i].current_length = 0;
 		my_devs[i].buffer = NULL;
-		my_devs[i].write_counter = 0;
-
+		my_devs[i].write_opened = 0;
+		my_devs[i].read_count = 0;
 		// initialisieren des semaphors
 		sema_init(&my_devs[i].sync, 1);
 
@@ -148,14 +151,14 @@ static int mydev_open(struct inode *inode, struct file *filp) {
 	if (filp->f_mode & FMODE_WRITE) {		// FMODE_WRITE --> mit schreiben geoeffnet
 		
 		// ueberpruefung ob gerade gelesen wird
-		if (dev->write_counter != 0) {
+		if (dev->write_opened != 0) {
 			up(&dev->sync);
 			return -EBUSY;
 		}	
 		
 
 		// aufs device kann zugegriffen werden 
-		dev->write_counter = 1;
+		dev->write_opened = 1;
 		// zuweisen des speichers wenn dieser noch nicht vorhanden
 		if (!dev->buffer) {
 			dev->buffer = kmalloc(BUFFER_SIZE, GFP_KERNEL);
@@ -168,6 +171,7 @@ static int mydev_open(struct inode *inode, struct file *filp) {
 			up(&dev->sync);		
 			return -EPERM;
 		}
+		dev->read_count += 1;
 	}
 	// freigeben des Semaphores
 	up(&dev->sync);
@@ -181,8 +185,9 @@ static int mydev_release(struct inode *inode, struct file *filp) {
 		return -ERESTARTSYS;
 	}
 	
-	// zuruecksetzen des write_counters
-	dev->write_counter = 0;
+	// zuruecksetzen des write_openeds
+	dev->write_opened = 0;
+	dev->read_count -= 1;
 	pr_info("dev %d closed\n", MINOR(dev->dev_num));
 
 	up(&dev->sync);
@@ -254,8 +259,57 @@ static ssize_t mydev_write(struct file *filp, const char __user *buff, size_t co
 }
  
 static long mydev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
-	pr_info("TODO ioctl\n");
-	//my_cdev_t *dev = filp->private_data;
+	my_cdev_t *dev = filp->private_data;
+	
+	if (_IOC_TYPE(cmd) != IOC_MY_MAGIC) {
+		return -1;
+  }
+	switch (_IOC_NR(cmd)) {
+		case IOC_NR_OPENREADCNT:
+			if (_IOC_DIR(cmd) != _IOC_NONE) {
+				printk("Wrong direction. Must be \"no data transfer\"!\n");
+				break;
+			}
+			if (down_interruptible(&dev->sync)) {
+				return -ERESTARTSYS;
+			}	
+			printk("The device is currently opened %d times for read\n", dev->read_count);
+			up(&dev->sync);
+			break;			
+
+		case IOC_NR_OPENWRITE:
+			if (_IOC_DIR(cmd) != _IOC_NONE) {
+				printk("Wrong direction. Must be \"no data transfer\"!\n");
+				break;
+			}
+			if (down_interruptible(&dev->sync)) {
+				return -ERESTARTSYS;
+			}
+			if (dev->write_opened) {
+				printk("The device is currently opened for write\n");
+			}
+			else {
+				printk("The device is currently not opened for write\n");
+			}
+			up(&dev->sync);
+			break;
+
+
+		case IOC_NR_CLEAR:
+			if (_IOC_DIR(cmd) != _IOC_NONE) {
+				printk("Wrong direction. Must be \"no data transfer\"!\n");
+				break;
+			}
+			if (down_interruptible(&dev->sync)) {
+				return -ERESTARTSYS;
+			}
+			dev->current_length = 0;
+			up(&dev->sync);
+			break;
+		
+		default:
+			printk("ioctl: unknown operation\n");
+	}
 	return 0;
 } 
 
