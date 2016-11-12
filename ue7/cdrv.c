@@ -294,6 +294,8 @@ static ssize_t mydev_read(struct file *filp, char __user *buff, size_t count, lo
 	// ueberpruefen von eof
 	if (*offset >= dev->current_length) {
 		end_time = current_kernel_time();
+		calc_time_diff(&start_time, &end_time, &sec, &nsec); 
+		add_syscall_time(dev, sec, nsec, READ_TIME); 
 		up(&dev->sync);
 		return 0;
 	}
@@ -316,6 +318,12 @@ static ssize_t mydev_write(struct file *filp, const char __user *buff, size_t co
 	int allowed_count;
 	int not_copied;
 	int length;	
+	long sec;
+	long nsec; 
+	struct timespec start_time;
+	struct timespec end_time;;
+
+	start_time = current_kernel_time();
 
 	if (down_interruptible(&dev->sync)) {
 		return -ERESTARTSYS;
@@ -336,6 +344,10 @@ static ssize_t mydev_write(struct file *filp, const char __user *buff, size_t co
 	}
 
 	*offset += (to_copy - not_copied);
+
+	end_time = current_kernel_time();
+	calc_time_diff(&start_time, &end_time, &sec, &nsec); 
+	add_syscall_time(dev, sec, nsec, WRITE_TIME); 
 
 	up(&dev->sync);	
 
