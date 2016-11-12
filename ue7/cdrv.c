@@ -28,9 +28,13 @@ MODULE_LICENSE("Dual BSD/GPL");
 #define MINOR_START 0	//start index
 #define PROC_DIR_NAME "is151002"
 #define PROC_FILE_NAME "info"
+#define READ_TIME 1
+#define WRITE_TIME 2
 
 static int __init cdrv_init(void);
 static void __exit cdrv_exit(void);
+
+static void calc_time_diff(struct timespec *start_time, struct timespec *end_time, long *sec, long *nsec); 
 
 static int mydev_open(struct inode *inode, struct file *filp);
 static int mydev_release(struct inode *inode, struct file *filp);
@@ -91,6 +95,7 @@ typedef struct my_cdev {
 	// wird vom kernel benoetigt
 	struct cdev cdev;
 } my_cdev_t;
+static void add_syscall_time(my_cdev_t *dev, long sec, long nsec, int type); 
 
 static struct class *my_class;
 static my_cdev_t *my_devs;
@@ -266,10 +271,13 @@ static ssize_t mydev_read(struct file *filp, char __user *buff, size_t count, lo
 	int allowed_count;
 	int to_copy;
 	int not_copied;
-	struct timespec ts;
+	long sec;
+	long nsec; 
+	struct timespec start_time;
+	struct timespec end_time;;
 
-	ts = current_kernel_time();
-	printk("time sec %ld, nsec %09ld\n", ts.tv_sec, ts.tv_nsec);
+	start_time = current_kernel_time();
+	// printk("time sec %ld, nsec %09ld\n", ts.tv_sec, ts.tv_nsec);
 
 	if (down_interruptible(&dev->sync)) {
 		return -ERESTARTSYS;
@@ -285,6 +293,7 @@ static ssize_t mydev_read(struct file *filp, char __user *buff, size_t count, lo
 
 	// ueberpruefen von eof
 	if (*offset >= dev->current_length) {
+		end_time = current_kernel_time();
 		up(&dev->sync);
 		return 0;
 	}
@@ -292,7 +301,10 @@ static ssize_t mydev_read(struct file *filp, char __user *buff, size_t count, lo
 	// copy_to_user liefert die anzahl der bytes, die nicht gelesen werden konnten
 	not_copied = copy_to_user(buff, dev->buffer + *offset, to_copy);
 	*offset = to_copy - not_copied;	// position nach dem read;
-	
+	end_time = current_kernel_time();
+	calc_time_diff(&start_time, &end_time, &sec, &nsec); 
+	add_syscall_time(dev, sec, nsec, READ_TIME); 
+
 	up(&dev->sync);
 
 	return *offset;
@@ -425,9 +437,9 @@ static int my_show(struct seq_file *sf, void *it) {
 	seq_printf(sf, "  Read count: %d\n", dev->read_syscall_count);
 	seq_printf(sf, "  Write count: %d\n", dev->write_syscall_count);
 	seq_printf(sf, "  Close count: %d\n", dev->close_syscall_count);
-	seq_printf(sf, "  Current lenth: %d\n", dev->close_syscall_count);
+	seq_printf(sf, "  Current lenth: %d\n", dev->current_length);
 	seq_printf(sf, "  Time reading: %ld.%09ld\n", dev->time_read_sec, dev->time_read_nsec);
-	seq_printf(sf, "  Time writing: %ld.%09ld\n", dev->time_write_sec, dev->time_write_nsec);
+	seq_printf(sf, "  Time writing: %ld.%09ld\n\n", dev->time_write_sec, dev->time_write_nsec);
 	up(&dev->sync);	
 	return 0;
 }
@@ -437,3 +449,39 @@ static void my_stop(struct seq_file *sf, void *it) {
 	// kann cleanup gemacht werden. bei uns nicht notwendig
 }
 
+static void calc_time_diff(struct timespec *start_time, struct timespec *end_time, long *sec, long *nsec) {
+	*sec = end_time->tv_sec - start_time->tv_sec;
+	*nsec = ((end_time->tv_nsec - start_time->tv_nsec) < 0) ? end_time->tv_nsec - start_time->tv_nsec + 1000000000 : end_time->tv_nsec - start_time->tv_nsec;
+	if ((end_time->tv_nsec - start_time->tv_nsec) < 0) {
+		(*sec)--;
+	}
+}
+
+static void add_syscall_time(my_cdev_t *dev, long sec, long nsec, int type) {
+	if (down_interruptible(&dev->sync)) {
+		return;
+	}
+	switch (type) {
+		case READ_TIME:
+			dev->time_read_sec += sec;
+			dev->time_read_nsec += nsec;
+			if (dev->time_read_nsec > 1000000000) {
+				dev->time_read_sec += 1;
+				dev->time_read_nsec -= 1000000000;
+			}			
+			break;
+
+		case WRITE_TIME:
+			dev->time_write_sec += sec;
+			dev->time_write_nsec += nsec;
+			if (dev->time_write_nsec > 1000000000) {
+				dev->time_write_sec += 1;
+				dev->time_write_nsec -= 1000000000;
+			}
+			break;
+
+		default:
+			break;
+	}
+	up(&dev->sync);
+}
