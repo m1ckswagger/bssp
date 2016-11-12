@@ -18,6 +18,10 @@
 #include <linux/module.h>
 #include <linux/slab.h>
 
+#include <linux/jiffies.h>
+#include <linux/time.h>
+#include <linux/delay.h>
+
 #include "my_ioctl.h"
 
 MODULE_LICENSE("Dual BSD/GPL");
@@ -293,6 +297,7 @@ static ssize_t mydev_read(struct file *filp, char __user *buff, size_t count, lo
 
 	// ueberpruefen von eof
 	if (*offset >= dev->current_length) {
+		mdelay(100L); // dealy 100 millisecs
 		end_time = current_kernel_time();
 		calc_time_diff(&start_time, &end_time, &sec, &nsec); 
 		add_syscall_time(dev, sec, nsec, READ_TIME); 
@@ -303,6 +308,8 @@ static ssize_t mydev_read(struct file *filp, char __user *buff, size_t count, lo
 	// copy_to_user liefert die anzahl der bytes, die nicht gelesen werden konnten
 	not_copied = copy_to_user(buff, dev->buffer + *offset, to_copy);
 	*offset = to_copy - not_copied;	// position nach dem read;
+
+	mdelay(100L); // dealy 100 millisecs
 	end_time = current_kernel_time();
 	calc_time_diff(&start_time, &end_time, &sec, &nsec); 
 	add_syscall_time(dev, sec, nsec, READ_TIME); 
@@ -345,6 +352,7 @@ static ssize_t mydev_write(struct file *filp, const char __user *buff, size_t co
 
 	*offset += (to_copy - not_copied);
 
+	mdelay(100L); // dealy 100 millisecs
 	end_time = current_kernel_time();
 	calc_time_diff(&start_time, &end_time, &sec, &nsec); 
 	add_syscall_time(dev, sec, nsec, WRITE_TIME); 
@@ -462,17 +470,25 @@ static void my_stop(struct seq_file *sf, void *it) {
 }
 
 static void calc_time_diff(struct timespec *start_time, struct timespec *end_time, long *sec, long *nsec) {
+	long nsec_diff;
+	printk("entered calc_time_diff\n");
+	printk("  Time start: %ld.%09ld\n", start_time->tv_sec, start_time->tv_nsec);
+	printk("  Time end  : %ld.%09ld\n", end_time->tv_sec, end_time->tv_nsec);
 	*sec = end_time->tv_sec - start_time->tv_sec;
-	*nsec = ((end_time->tv_nsec - start_time->tv_nsec) < 0) ? end_time->tv_nsec - start_time->tv_nsec + 1000000000 : end_time->tv_nsec - start_time->tv_nsec;
-	if ((end_time->tv_nsec - start_time->tv_nsec) < 0) {
-		(*sec)--;
+	nsec_diff = end_time->tv_nsec - start_time->tv_nsec;
+	if (nsec_diff < 0) {
+		*nsec = nsec_diff + 1000000000;
+		(*sec)++;
 	}
+	else {
+		*nsec = nsec_diff;
+	}  
+	printk("  Difference: %ld.%09ld\n", *sec, *nsec);
 }
 
 static void add_syscall_time(my_cdev_t *dev, long sec, long nsec, int type) {
-	if (down_interruptible(&dev->sync)) {
-		return;
-	}
+	int index = dev - my_devs;
+	printk("entered add_syscall_time\n");	
 	switch (type) {
 		case READ_TIME:
 			dev->time_read_sec += sec;
@@ -480,7 +496,8 @@ static void add_syscall_time(my_cdev_t *dev, long sec, long nsec, int type) {
 			if (dev->time_read_nsec > 1000000000) {
 				dev->time_read_sec += 1;
 				dev->time_read_nsec -= 1000000000;
-			}			
+			}
+			printk("Calculating read time for mydev%d\n", index + MINOR_START);			
 			break;
 
 		case WRITE_TIME:
@@ -490,10 +507,10 @@ static void add_syscall_time(my_cdev_t *dev, long sec, long nsec, int type) {
 				dev->time_write_sec += 1;
 				dev->time_write_nsec -= 1000000000;
 			}
+			printk("Calculating write time for mydev%d\n", index + MINOR_START);			
 			break;
 
 		default:
 			break;
 	}
-	up(&dev->sync);
 }
