@@ -86,14 +86,19 @@ typedef struct my_cdev {
 	int current_length;	
 	int write_opened;
 	int read_count;
+	int read_max_open;
+
 	int open_syscall_count;
 	int read_syscall_count;
 	int write_syscall_count;
 	int close_syscall_count;
+	
 	long time_read_sec;
 	long time_read_nsec;
 	long time_write_sec;
 	long time_write_nsec;
+
+
 	struct semaphore sync;	// zum sync der daten im device
 	dev_t dev_num;					// entspricht u32 bzw uint32_t
 	// wird vom kernel benoetigt
@@ -123,14 +128,14 @@ static int __init cdrv_init(void)
 		kfree(my_devs);
 		return result;
 	}
-	pr_info("Major %d, Minor %d\n", MAJOR(dev_num), MINOR(dev_num));
+	pr_info("cdrv: Major %d, Minor %d\n", MAJOR(dev_num), MINOR(dev_num));
 	
 	// create a class (directory) in /sys/class
 	my_class = class_create(THIS_MODULE, "my_driver_class");
 
 	proc_parent = proc_mkdir(PROC_DIR_NAME, NULL);
 	if (!proc_parent) {
-		printk(KERN_ERR "create proc dir failed\n");
+		printk(KERN_ERR "cdrv: create proc dir failed\n");
 		goto proc_err_1;
 	}
 	proc_entry = proc_create_data(PROC_FILE_NAME, 0664, proc_parent, &my_proc_fcalls, NULL);
@@ -152,10 +157,13 @@ static int __init cdrv_init(void)
 		my_devs[i].buffer = NULL;
 		my_devs[i].write_opened = 0;
 		my_devs[i].read_count = 0;
+		my_devs[i].read_max_open = 0;
+
 		my_devs[i].open_syscall_count = 0;
 		my_devs[i].read_syscall_count = 0;
 		my_devs[i].write_syscall_count = 0;
 		my_devs[i].close_syscall_count = 0;
+		
 		my_devs[i].time_read_sec = 0;
 		my_devs[i].time_read_nsec = 0;
 		my_devs[i].time_write_sec = 0;
@@ -165,12 +173,12 @@ static int __init cdrv_init(void)
 		sema_init(&my_devs[i].sync, 1);
 
 		if(device_create(my_class, NULL, cur_devnr, NULL, "mydev%d", MINOR(cur_devnr)) == (struct device *)ERR_PTR) {
-			pr_warn("device creation failed!\n");
+			pr_warn("cdrv: device creation failed!\n");
 			// TODO cleanup
 		}
 		if((err = cdev_add(&my_devs[i].cdev, cur_devnr, 1)) < 0) {
 			// TODO cleanup
-			pr_warn("cdev_add failed...!\n");
+			pr_warn("cdrv: cdev_add failed...!\n");
 		}
 	}
 	return 0;
@@ -200,13 +208,13 @@ static void __exit cdrv_exit(void) {
 		if(my_devs[i].buffer) {
 			kfree(my_devs[i].buffer);
 		}
-		printk("cleanup device %d\n", i);
+		printk("cdrv: cleanup device %d\n", i);
 	}
 	
 	class_destroy(my_class);
 	unregister_chrdev_region(dev_num, MINOR_COUNT);
 	kfree(my_devs);
-	pr_info("cleanup my character driver %s\n", DRVNAME);	
+	pr_info("cdrv: cleanup my character driver %s\n", DRVNAME);	
 }
 
 static int mydev_open(struct inode *inode, struct file *filp) {
@@ -237,7 +245,7 @@ static int mydev_open(struct inode *inode, struct file *filp) {
 		if (!dev->buffer) {
 			dev->buffer = kmalloc(BUFFER_SIZE, GFP_KERNEL);
 		}	
-		pr_info("dev %d opened\n", MINOR(dev->dev_num));
+		pr_info("cdrv: mydev%d opened\n", MINOR(dev->dev_num));
 		
 	}
 	else if (filp->f_mode & FMODE_READ) {		// FMODE_READ --> mit lesen geoeffnet
@@ -260,10 +268,15 @@ static int mydev_release(struct inode *inode, struct file *filp) {
 	}
 	
 	(dev->close_syscall_count)++;	
+
 	// zuruecksetzen des write_openeds
-	dev->write_opened = 0;
-	dev->read_count -= 1;
-	pr_info("dev %d closed\n", MINOR(dev->dev_num));
+	if (filp->f_mode & FMODE_WRITE) {
+		dev->write_opened = 0;
+	}
+	if (filp->f_mode & FMODE_READ) {
+		dev->read_count -= 1;
+	}
+	pr_info("cdrv: mydev%d closed\n", MINOR(dev->dev_num));
 
 	up(&dev->sync);
 	
@@ -291,9 +304,9 @@ static ssize_t mydev_read(struct file *filp, char __user *buff, size_t count, lo
 	allowed_count = dev->current_length;
 	to_copy = (allowed_count < count) ? allowed_count : count;
 
-	pr_info("dev %d to_copy: %d\n", MINOR(dev->dev_num), to_copy);
-	pr_info("dev %d current_length: %d\n", MINOR(dev->dev_num), dev->current_length);
-	pr_info("dev %d offset: %lld\n", MINOR(dev->dev_num), *offset);
+	pr_info("cdrv: dev%d to_copy: %d\n", MINOR(dev->dev_num), to_copy);
+	pr_info("cdrv: mydev%d current_length: %d\n", MINOR(dev->dev_num), dev->current_length);
+	pr_info("cdrv: mydev%d offset: %lld\n", MINOR(dev->dev_num), *offset);
 
 	// ueberpruefen von eof
 	if (*offset >= dev->current_length) {
@@ -364,36 +377,35 @@ static ssize_t mydev_write(struct file *filp, const char __user *buff, size_t co
  
 static long mydev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
 	my_cdev_t *dev = filp->private_data;
-	
 	if (_IOC_TYPE(cmd) != IOC_MY_MAGIC) {
 		return -1;
   }
 	switch (_IOC_NR(cmd)) {
 		case IOC_NR_OPENREADCNT:
 			if (_IOC_DIR(cmd) != _IOC_NONE) {
-				printk("Wrong direction. Must be \"no data transfer\"!\n");
+				printk("cdrv: Wrong direction. Must be \"no data transfer\"!\n");
 				break;
 			}
 			if (down_interruptible(&dev->sync)) {
 				return -ERESTARTSYS;
 			}	
-			printk("The device is currently opened %d times for read\n", dev->read_count);
+			printk("cdrv: The device is currently opened %d times for read\n", dev->read_count);
 			up(&dev->sync);
 			break;			
 
 		case IOC_NR_OPENWRITE:
 			if (_IOC_DIR(cmd) != _IOC_NONE) {
-				printk("Wrong direction. Must be \"no data transfer\"!\n");
+				printk("cdrv: Wrong direction. Must be \"no data transfer\"!\n");
 				break;
 			}
 			if (down_interruptible(&dev->sync)) {
 				return -ERESTARTSYS;
 			}
 			if (dev->write_opened) {
-				printk("The device is currently opened for write\n");
+				printk("cdrv: The device is currently opened for write\n");
 			}
 			else {
-				printk("The device is currently not opened for write\n");
+				printk("cdrv: The device is currently not opened for write\n");
 			}
 			up(&dev->sync);
 			break;
@@ -401,7 +413,7 @@ static long mydev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) 
 
 		case IOC_NR_CLEAR:
 			if (_IOC_DIR(cmd) != _IOC_NONE) {
-				printk("Wrong direction. Must be \"no data transfer\"!\n");
+				printk("cdrv: Wrong direction. Must be \"no data transfer\"!\n");
 				break;
 			}
 			if (down_interruptible(&dev->sync)) {
@@ -411,8 +423,19 @@ static long mydev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) 
 			up(&dev->sync);
 			break;
 		
+		case IOC_NR_READ_MAX_OPEN:
+			if (_IOC_DIR(cmd) != _IOC_WRITE) {
+				printk(KERN_ERR "WRONG direction for ioctl with IOC_IGNORE_MODE\n");
+				break;
+			}
+			if (down_interruptible(&dev->sync)) {
+				return -ERESTARTSYS;
+			}
+			dev->read_max_open = arg;
+			printk("cdrv: limit for open reads set to %ld\n", arg);
+			
 		default:
-			printk("ioctl: unknown operation\n");
+			printk("cdrv: ioctl: unknown operation\n");
 	}
 	return 0;
 } 
@@ -422,7 +445,7 @@ static int my_seq_file_open(struct inode *inode, struct file *filp) {
 }
 
 static void *my_start(struct seq_file *sf, loff_t *pos) {
-	pr_info("start, pos %ld\n", (long)*pos);
+	pr_info("cdrv: start, pos %ld\n", (long)*pos);
 	if (*pos == 0) {
 		return my_devs;
 	}
@@ -430,7 +453,7 @@ static void *my_start(struct seq_file *sf, loff_t *pos) {
 }
 
 static void *my_next(struct seq_file *sf, void *it, loff_t *pos) {
-	pr_info("next, pos before increase %ld\n", (long)*pos);
+	pr_info("    next, pos before increase %ld\n", (long)*pos);
 	(*pos)++;
 	if (*pos >= MINOR_COUNT) {
 		return NULL;
@@ -447,33 +470,33 @@ static int my_show(struct seq_file *sf, void *it) {
 	//	1) durch minor number
 	//	2) durch Zeigerdifferenz
 	int index  = dev - my_devs;
-	pr_info("show for index %d\n", index);
+	//pr_info("cdrv: show for index %d\n", index);
 
 	if (down_interruptible(&dev->sync)) {
 		return -ERESTARTSYS;
 	}
-	seq_printf(sf, "STATUS OF mydev%d:\n", index + MINOR_START);
-	seq_printf(sf, "  Open count: %d\n", dev->open_syscall_count);
-	seq_printf(sf, "  Read count: %d\n", dev->read_syscall_count);
-	seq_printf(sf, "  Write count: %d\n", dev->write_syscall_count);
-	seq_printf(sf, "  Close count: %d\n", dev->close_syscall_count);
-	seq_printf(sf, "  Current lenth: %d\n", dev->current_length);
-	seq_printf(sf, "  Time reading: %ld.%09ld\n", dev->time_read_sec, dev->time_read_nsec);
-	seq_printf(sf, "  Time writing: %ld.%09ld\n\n", dev->time_write_sec, dev->time_write_nsec);
+	seq_printf(sf, "cdrv: STATUS OF mydev%d:\n", index + MINOR_START);
+	seq_printf(sf, "   Open count: %d\n", dev->open_syscall_count);
+	seq_printf(sf, "   Read count: %d\n", dev->read_syscall_count);
+	seq_printf(sf, "   Write count: %d\n", dev->write_syscall_count);
+	seq_printf(sf, "   Close count: %d\n", dev->close_syscall_count);
+	seq_printf(sf, "   Current lenth: %d\n", dev->current_length);
+	seq_printf(sf, "   Time reading: %ld.%09ld\n", dev->time_read_sec, dev->time_read_nsec);
+	seq_printf(sf, "   Time writing: %ld.%09ld\n\n", dev->time_write_sec, dev->time_write_nsec);
 	up(&dev->sync);	
 	return 0;
 }
 
 static void my_stop(struct seq_file *sf, void *it) {
-	pr_info("stop\n");
+	pr_info("  stop\n");
 	// kann cleanup gemacht werden. bei uns nicht notwendig
 }
 
 static void calc_time_diff(struct timespec *start_time, struct timespec *end_time, long *sec, long *nsec) {
 	long nsec_diff;
-	printk("entered calc_time_diff\n");
-	printk("  Time start: %ld.%09ld\n", start_time->tv_sec, start_time->tv_nsec);
-	printk("  Time end  : %ld.%09ld\n", end_time->tv_sec, end_time->tv_nsec);
+	printk("cdrv: entered calc_time_diff\n");
+	printk("   Time start: %ld.%09ld\n", start_time->tv_sec, start_time->tv_nsec);
+	printk("   Time end  : %ld.%09ld\n", end_time->tv_sec, end_time->tv_nsec);
 	*sec = end_time->tv_sec - start_time->tv_sec;
 	nsec_diff = end_time->tv_nsec - start_time->tv_nsec;
 	if (nsec_diff < 0) {
@@ -483,12 +506,12 @@ static void calc_time_diff(struct timespec *start_time, struct timespec *end_tim
 	else {
 		*nsec = nsec_diff;
 	}  
-	printk("  Difference: %ld.%09ld\n", *sec, *nsec);
+	printk("   Difference: %ld.%09ld\n", *sec, *nsec);
 }
 
 static void add_syscall_time(my_cdev_t *dev, long sec, long nsec, int type) {
-	int index = dev - my_devs;
-	printk("entered add_syscall_time\n");	
+	// int index = dev - my_devs;
+	//printk("entered add_syscall_time\n");	
 	switch (type) {
 		case READ_TIME:
 			dev->time_read_sec += sec;
@@ -497,7 +520,7 @@ static void add_syscall_time(my_cdev_t *dev, long sec, long nsec, int type) {
 				dev->time_read_sec += 1;
 				dev->time_read_nsec -= 1000000000;
 			}
-			printk("Calculating read time for mydev%d\n", index + MINOR_START);			
+			//printk("Calculating read time for mydev%d\n", index + MINOR_START);			
 			break;
 
 		case WRITE_TIME:
@@ -507,7 +530,7 @@ static void add_syscall_time(my_cdev_t *dev, long sec, long nsec, int type) {
 				dev->time_write_sec += 1;
 				dev->time_write_nsec -= 1000000000;
 			}
-			printk("Calculating write time for mydev%d\n", index + MINOR_START);			
+			//printk("Calculating write time for mydev%d\n", index + MINOR_START);			
 			break;
 
 		default:
