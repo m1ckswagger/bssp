@@ -78,6 +78,14 @@ typedef struct my_cdev {
 	int current_length;	
 	int write_opened;
 	int read_count;
+	int open_syscall_count;
+	int read_syscall_count;
+	int write_syscall_count;
+	int close_syscall_count;
+	long time_read_sec;
+	long time_read_nsec;
+	long time_write_sec;
+	long time_write_nsec;
 	struct semaphore sync;	// zum sync der daten im device
 	dev_t dev_num;					// entspricht u32 bzw uint32_t
 	// wird vom kernel benoetigt
@@ -135,6 +143,15 @@ static int __init cdrv_init(void)
 		my_devs[i].buffer = NULL;
 		my_devs[i].write_opened = 0;
 		my_devs[i].read_count = 0;
+		my_devs[i].open_syscall_count = 0;
+		my_devs[i].read_syscall_count = 0;
+		my_devs[i].write_syscall_count = 0;
+		my_devs[i].close_syscall_count = 0;
+		my_devs[i].time_read_sec = 0;
+		my_devs[i].time_read_nsec = 0;
+		my_devs[i].time_write_sec = 0;
+		my_devs[i].time_write_nsec = 0;
+
 		// initialisieren des semaphors
 		sema_init(&my_devs[i].sync, 1);
 
@@ -195,7 +212,7 @@ static int mydev_open(struct inode *inode, struct file *filp) {
 	// damit spaeter bei read und write auf dev zugegriffen werden kann (weil spaeter 
 	// inode nicht als parameter uebergeben werden kann)
 	filp->private_data = dev;
-	
+	(dev->open_syscall_count)++;	
 	if (filp->f_mode & FMODE_WRITE) {		// FMODE_WRITE --> mit schreiben geoeffnet
 		
 		// ueberpruefung ob gerade gelesen wird
@@ -233,6 +250,7 @@ static int mydev_release(struct inode *inode, struct file *filp) {
 		return -ERESTARTSYS;
 	}
 	
+	(dev->close_syscall_count)++;	
 	// zuruecksetzen des write_openeds
 	dev->write_opened = 0;
 	dev->read_count -= 1;
@@ -257,6 +275,7 @@ static ssize_t mydev_read(struct file *filp, char __user *buff, size_t count, lo
 		return -ERESTARTSYS;
 	}
 
+	(dev->read_syscall_count)++;	
 	allowed_count = dev->current_length;
 	to_copy = (allowed_count < count) ? allowed_count : count;
 
@@ -289,6 +308,7 @@ static ssize_t mydev_write(struct file *filp, const char __user *buff, size_t co
 	if (down_interruptible(&dev->sync)) {
 		return -ERESTARTSYS;
 	}
+	(dev->write_syscall_count)++;	
 
 	// jump always to the end
 	*offset = dev->current_length;
@@ -397,12 +417,18 @@ static int my_show(struct seq_file *sf, void *it) {
 	int index  = dev - my_devs;
 	pr_info("show for index %d\n", index);
 
-	// TODO sem down_interruptible ...
-
-	seq_printf(sf, "mydev%d ...... current_length: %d\n", index + MINOR_START, dev->current_length);
-	
-	// TODO sem up
-	
+	if (down_interruptible(&dev->sync)) {
+		return -ERESTARTSYS;
+	}
+	seq_printf(sf, "STATUS OF mydev%d:\n", index + MINOR_START);
+	seq_printf(sf, "  Open count: %d\n", dev->open_syscall_count);
+	seq_printf(sf, "  Read count: %d\n", dev->read_syscall_count);
+	seq_printf(sf, "  Write count: %d\n", dev->write_syscall_count);
+	seq_printf(sf, "  Close count: %d\n", dev->close_syscall_count);
+	seq_printf(sf, "  Current lenth: %d\n", dev->close_syscall_count);
+	seq_printf(sf, "  Time reading: %ld.%09ld\n", dev->time_read_sec, dev->time_read_nsec);
+	seq_printf(sf, "  Time writing: %ld.%09ld\n", dev->time_write_sec, dev->time_write_nsec);
+	up(&dev->sync);	
 	return 0;
 }
 
