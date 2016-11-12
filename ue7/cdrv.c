@@ -288,6 +288,8 @@ static ssize_t mydev_read(struct file *filp, char __user *buff, size_t count, lo
 	int allowed_count;
 	int to_copy;
 	int not_copied;
+	int rdbytes = 0;
+	
 	long sec;
 	long nsec; 
 	struct timespec start_time;
@@ -299,29 +301,79 @@ static ssize_t mydev_read(struct file *filp, char __user *buff, size_t count, lo
 	if (down_interruptible(&dev->sync)) {
 		return -ERESTARTSYS;
 	}
-
 	(dev->read_syscall_count)++;	
-	allowed_count = dev->current_length;
-	to_copy = (allowed_count < count) ? allowed_count : count;
 
-	pr_info("cdrv: dev%d to_copy: %d\n", MINOR(dev->dev_num), to_copy);
-	pr_info("cdrv: mydev%d current_length: %d\n", MINOR(dev->dev_num), dev->current_length);
-	pr_info("cdrv: mydev%d offset: %lld\n", MINOR(dev->dev_num), *offset);
-
-	// ueberpruefen von eof
-	if (*offset >= dev->current_length) {
-		mdelay(100L); // dealy 100 millisecs
-		end_time = current_kernel_time();
+	if (buff == NULL) {
+		pr_devel("cdrv: read: got NULL buffer\n");
 		calc_time_diff(&start_time, &end_time, &sec, &nsec); 
 		add_syscall_time(dev, sec, nsec, READ_TIME); 
-		up(&dev->sync);
+		up(&dev->sync);	
+		return -EINVAL;
+	}
+	else if (count == 0) {
+		pr_devel("cdrv: read: nothing requested\n");
+		calc_time_diff(&start_time, &end_time, &sec, &nsec); 
+		add_syscall_time(dev, sec, nsec, READ_TIME); 
+		up(&dev->sync);	
+		return 0;
+	}
+	else if (*offset > BUFFER_SIZE) {
+		pr_devel("cdrv: read: given offset is out of buffer range\n");
+		calc_time_diff(&start_time, &end_time, &sec, &nsec); 
+		add_syscall_time(dev, sec, nsec, READ_TIME); 
+		up(&dev->sync);	
+		return -ESPIPE;
+	}
+	else if (*offset == BUFFER_SIZE) {
+		pr_devel("cdrv: read: given offset is exactly buffersize (%lld)\n", *offset);
+		calc_time_diff(&start_time, &end_time, &sec, &nsec); 
+		add_syscall_time(dev, sec, nsec, READ_TIME); 
+		up(&dev->sync);	
 		return 0;
 	}
 
-	// copy_to_user liefert die anzahl der bytes, die nicht gelesen werden konnten
-	not_copied = copy_to_user(buff, dev->buffer + *offset, to_copy);
-	*offset = to_copy - not_copied;	// position nach dem read;
+	// kuerzen von count so dass max bis zum ende gelesen werden kann
+	if (*offset + count > BUFFER_SIZE) {
+		for (; *offset + count > BUFFER_SIZE; count -= (*offset + count) - BUFFER_SIZE) 
+			;	
+		pr_devel("cdrv: read: request way too much - reduced count to %zd\n", count);
+		if (count == 0) {
+			pr_devel("cdrv: read: due to reduction nothing requested\n");
+			calc_time_diff(&start_time, &end_time, &sec, &nsec); 
+			add_syscall_time(dev, sec, nsec, READ_TIME); 
+			up(&dev->sync);	
+			return 0;	
+		}	
+	}
+	pr_devel("cdrv: read: FMODE_NDLAY: %d, may not block %d, O_NDELAY: %d, O_NONBLOCK: %d\n", filep->f_flags & FMODE_NDELAY, filep->f_flags & MAY_NOT_BLOCK, filep->f_flags & O_NDELAY, filep->f_flags & O_NONBLOCK);
 
+	
+	do {
+		pr_devel("cdrv: read: already read: %zd, count=%zd\n", already_read, count);
+		if (*offset >= dev->current_length) {
+			pr_devel("cdrv: read: open write-processes: %ld\n", dev->write_opened);
+			if (filp->f_flags & O_NONBLOCK || dev->write_opened == 0) {
+				calc_time_diff(&start_time, &end_time, &sec, &nsec); 
+				add_syscall_time(dev, sec, nsec, READ_TIME); 
+				up(&dev->sync);	
+				return rdbytes;
+			}
+			else {
+				pr_devel("cdrv: read: now at offset %lld and nothing more in buffer\n", *offset);
+				pr_devel("cdrv: read: number of writers was: %ld\n", dev->write_opened);
+				up(%dev->sync);
+				end_time = current_kernel_time();
+				pr_devel("cdrv: read: waiting until file gets modified %ld.%09ld\n", end_time.tv_sec, end_time.tv_nsec);
+				wait_event_interruptible(dev->rwq, (*offset < dev->current_length || dev->write_opened == 0);
+				pr_devel("cdrv: read: woke up\n");
+				end_time = current_kernel_time();
+				pr_info("cdrv: read: file was modified  %ld.%09ld\n", end_time.tv_sec, end_time.tv_nsec);
+				pr_devel("cdrv: read: offset: %lld current_length: %zd\n", *offset, dev->current_length);
+				continue;
+			}
+		}
+	} while ();
+		
 	mdelay(100L); // dealy 100 millisecs
 	end_time = current_kernel_time();
 	calc_time_diff(&start_time, &end_time, &sec, &nsec); 
