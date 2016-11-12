@@ -26,6 +26,8 @@ MODULE_LICENSE("Dual BSD/GPL");
 #define BUFFER_SIZE 1024
 #define MINOR_COUNT 5
 #define MINOR_START 0	//start index
+#define PROC_DIR_NAME "is151002"
+#define PROC_FILE_NAME "info"
 
 static int __init cdrv_init(void);
 static void __exit cdrv_exit(void);
@@ -35,6 +37,12 @@ static int mydev_release(struct inode *inode, struct file *filp);
 static ssize_t mydev_read(struct file *filp, char __user *buff, size_t count, loff_t *offset);
 static ssize_t mydev_write(struct file *filp, const char __user *buff, size_t count, loff_t *offset);
 static long mydev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg);
+// fuer proc interface
+static int my_seq_file_open(struct inode *inode, struct file *filp);
+static void *my_start(struct seq_file *sf, loff_t *pos);
+static void *my_next(struct seq_file *sf, void *it, loff_t *pos);
+static int my_show(struct seq_file *sf, void *it);
+static void my_stop(struct seq_file *sf, void *it);
 
 
 module_init(cdrv_init);
@@ -47,6 +55,21 @@ static struct file_operations mydev_fcalls = {
 	.read = mydev_read,
 	.write = mydev_write,
 	.unlocked_ioctl = mydev_ioctl
+};
+
+static struct file_operations my_proc_fcalls = {
+	.owner = THIS_MODULE,
+	.open = my_seq_file_open,		// eigenes open fuer /proc/is151002/info
+	.read = seq_read,
+	.llseek = seq_lseek,
+	.release = seq_release
+};
+
+static struct seq_operations my_seq_ops = {
+	.start = my_start,
+	.next = my_next,
+	.stop = my_stop,
+	.show = my_show
 };
 
 // diese Struktur existiert pro device
@@ -64,7 +87,8 @@ typedef struct my_cdev {
 static struct class *my_class;
 static my_cdev_t *my_devs;
 static dev_t dev_num;		// entspricht u32 bzw uint32_t
-
+static struct proc_dir_entry *proc_parent;	// fuer /proc/is151002
+static struct proc_dir_entry *proc_entry;		// fuer /proc/is151002/info
 
 static int __init cdrv_init(void)
 {
@@ -86,7 +110,17 @@ static int __init cdrv_init(void)
 	
 	// create a class (directory) in /sys/class
 	my_class = class_create(THIS_MODULE, "my_driver_class");
-	
+
+	proc_parent = proc_mkdir(PROC_DIR_NAME, NULL);
+	if (!proc_parent) {
+		printk(KERN_ERR "create proc dir failed\n");
+		goto proc_err_1;
+	}
+	proc_entry = proc_create_data(PROC_FILE_NAME, 0664, proc_parent, &my_proc_fcalls, NULL);
+	if(!proc_entry) {
+		goto proc_err_2;
+	}
+
 	for(i = 0; i < MINOR_COUNT; i++) {
 		int err;
 
@@ -114,10 +148,24 @@ static int __init cdrv_init(void)
 		}
 	}
 	return 0;
+
+	proc_err_2:
+		remove_proc_entry(PROC_DIR_NAME, NULL);
+	proc_err_1:
+		class_destroy(my_class);
+		unregister_chrdev_region(dev_num, MINOR_COUNT);
+		kfree(my_devs);
+		return -1;	// TODO correct makro for error
+
 }
 
 static void __exit cdrv_exit(void) {
 	int i;
+
+	// remove proc file and dir
+	remove_proc_entry(PROC_FILE_NAME, proc_parent);
+	remove_proc_entry(PROC_DIR_NAME, NULL);
+		
 
 	printk(KERN_INFO "cdrv: Goodbye, kernel world!\n");
 	for(i = 0; i < MINOR_COUNT; i++) {
@@ -200,6 +248,10 @@ static ssize_t mydev_read(struct file *filp, char __user *buff, size_t count, lo
 	int allowed_count;
 	int to_copy;
 	int not_copied;
+	struct timespec ts;
+
+	ts = current_kernel_time();
+	printk("time sec %ld, nsec %09ld\n", ts.tv_sec, ts.tv_nsec);
 
 	if (down_interruptible(&dev->sync)) {
 		return -ERESTARTSYS;
@@ -313,4 +365,49 @@ static long mydev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) 
 	return 0;
 } 
 
+static int my_seq_file_open(struct inode *inode, struct file *filp) {
+	return seq_open(filp, &my_seq_ops);
+}
+
+static void *my_start(struct seq_file *sf, loff_t *pos) {
+	pr_info("start, pos %ld\n", (long)*pos);
+	if (*pos == 0) {
+		return my_devs;
+	}
+	return NULL;
+}
+
+static void *my_next(struct seq_file *sf, void *it, loff_t *pos) {
+	pr_info("next, pos before increase %ld\n", (long)*pos);
+	(*pos)++;
+	if (*pos >= MINOR_COUNT) {
+		return NULL;
+	}
+	return my_devs + *pos; // gleich wie return &my_devs[*pos];
+}
+
+
+// it zeigt auf das, was bei start und next retourniert wird
+// --> it zeigt auf akt. device
+static int my_show(struct seq_file *sf, void *it) {
+	my_cdev_t *dev = (my_cdev_t *)it;
+	// index: 
+	//	1) durch minor number
+	//	2) durch Zeigerdifferenz
+	int index  = dev - my_devs;
+	pr_info("show for index %d\n", index);
+
+	// TODO sem down_interruptible ...
+
+	seq_printf(sf, "mydev%d ...... current_length: %d\n", index + MINOR_START, dev->current_length);
+	
+	// TODO sem up
+	
+	return 0;
+}
+
+static void my_stop(struct seq_file *sf, void *it) {
+	pr_info("stop\n");
+	// kann cleanup gemacht werden. bei uns nicht notwendig
+}
 
