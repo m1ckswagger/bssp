@@ -664,7 +664,7 @@ static int my_show(struct seq_file *sf, void *it) {
 	if (down_interruptible(&dev->sync)) {
 		return -ERESTARTSYS;
 	}
-	seq_printf(sf, "cdrv: STATUS OF mydev%d:\n", index + MINOR_START);
+	seq_printf(sf, "STATUS OF mydev%d:\n", index + MINOR_START);
 	seq_printf(sf, "   Open count: %d\n", dev->open_syscall_count);
 	seq_printf(sf, "   Read count: %d\n", dev->read_syscall_count);
 	seq_printf(sf, "   Write count: %d\n", dev->write_syscall_count);
