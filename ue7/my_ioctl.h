@@ -1,6 +1,8 @@
 #ifndef MY_IOCTL_H
 #define MY_IOCTL_H
 
+#include <asm-generic/ioctl.h>
+
 #define IOC_MY_MAGIC 0xA4			
 
 #define IOC_NR_OPENREADCNT 5
