@@ -7,6 +7,6 @@ dmesg
 sudo dmesg --clear
 
 gcc -Wall -O -g -o test_cdrv test_cdrv.c -pthread
-sudo ./test_bin
+sudo ./test_cdrv
 #sudo dmesg
-rm -f test_bin
+rm -f test_cdrv

@@ -90,6 +90,7 @@ typedef struct my_cdev {
 	size_t current_length;	
 	int write_opened;
 	long reader_count;
+	long writer_count;
 	unsigned long allowed_max_readers;
 
 	int open_syscall_count;
@@ -162,6 +163,7 @@ static int __init cdrv_init(void)
 		my_devs[i].current_length = 0;
 		my_devs[i].buffer = NULL;
 		my_devs[i].write_opened = 0;
+		my_devs[i].writer_count = 0;
 		my_devs[i].reader_count = 0;
 		my_devs[i].allowed_max_readers = 0;
 
@@ -241,8 +243,11 @@ static int mydev_open(struct inode *inode, struct file *filp) {
 	(dev->open_syscall_count)++;	
 	if (filp->f_mode & FMODE_WRITE) {		// FMODE_WRITE --> mit schreiben geoeffnet
 		
-		// ueberpruefung ob gerade gelesen wird
-		if (dev->write_opened != 0) {
+		if (dev->buffer == NULL) {
+			dev->buffer = kmalloc(BUFFER_SIZE, GFP_KERNEL);
+		}
+		else if (dev->write_opened) {
+			pr_info("cdrv: open: device already opened!\n");
 			up(&dev->sync);
 			return -EBUSY;
 		}	
@@ -250,15 +255,18 @@ static int mydev_open(struct inode *inode, struct file *filp) {
 
 		// aufs device kann zugegriffen werden 
 		dev->write_opened = 1;
+		/*
 		// zuweisen des speichers wenn dieser noch nicht vorhanden
 		if (!dev->buffer) {
 			dev->buffer = kmalloc(BUFFER_SIZE, GFP_KERNEL);
-		}	
-		pr_info("cdrv: mydev%d opened\n", MINOR(dev->dev_num));
+		}
+		*/	
+		dev->writer_count += 1;
+		pr_info("cdrv: open: write-locked mydev%d\n", MINOR(dev->dev_num));
 		
 	}
-	else if (filp->f_mode & FMODE_READ) {		// FMODE_READ --> mit lesen geoeffnet
-		if (!dev->buffer) {
+	if (filp->f_mode & FMODE_READ) {		// FMODE_READ --> mit lesen geoeffnet
+		if (dev->buffer == NULL) {
 			pr_info("cdrv: open: device must be opened for write before you can read\n");
 			up(&dev->sync);		
 			return -ENOSR;
@@ -287,6 +295,12 @@ static int mydev_release(struct inode *inode, struct file *filp) {
 	// zuruecksetzen des write_openeds
 	if (filp->f_mode & FMODE_WRITE) {
 		dev->write_opened = 0;
+		pr_devel("cdrv: release: released write-lock\n");
+		dev->writer_count -= 1;
+
+		pr_devel("cdrv: release: waking up clients\n");
+		wake_up_all(&dev->rwq);
+		pr_devel("cdrv: release: woke up readers\n");
 	}
 	if (filp->f_mode & FMODE_READ) {
 		dev->reader_count -= 1;
@@ -407,7 +421,7 @@ static ssize_t mydev_read(struct file *filp, char __user *buff, size_t count, lo
 		up(&dev->sync);
 	} while (rdbytes < count);
 		
-	mdelay(100L); // dealy 100 millisecs
+	mdelay(1L); // dealy 1 millisecs
 	end_time = current_kernel_time();
 	if (down_interruptible(&dev->sync)) {
 		return -ERESTARTSYS;
@@ -474,14 +488,14 @@ static ssize_t mydev_write(struct file *filp, const char __user *buff, size_t co
 	}
 	up(&dev->sync);
 
-	mdelay(100L); // dealy 100 millisecs
+	mdelay(1L); // dealy 100 millisecs
 	
 	while (count > 0) {
+		if (down_interruptible(&dev->sync)) {
+			return -ERESTARTSYS;
+		}	
 		if (*offset >= BUFFER_SIZE) {
 			if (filp->f_flags & O_NONBLOCK) {
-				if (down_interruptible(&dev->sync)) {
-					return -ERESTARTSYS;
-				}	
 				end_time = current_kernel_time();
 				calc_time_diff(&start_time, &end_time, &sec, &nsec); 
 				add_syscall_time(dev, sec, nsec, WRITE_TIME); 
@@ -492,6 +506,7 @@ static ssize_t mydev_write(struct file *filp, const char __user *buff, size_t co
 				pr_devel("cdrv: write: wait for ioctl\n");
 				end_time = current_kernel_time();
 				pr_info("cdrv: write: waiting started until the buffer get flushed %ld.%09ld\n", end_time.tv_sec, end_time.tv_nsec);
+				up(&dev->sync);
 				wait_event_interruptible(dev->ioctl_cleared, (dev->current_length != BUFFER_SIZE));
 				pr_devel("cdrv: write: ioctl done\n");
 				end_time = current_kernel_time();
@@ -500,9 +515,6 @@ static ssize_t mydev_write(struct file *filp, const char __user *buff, size_t co
 			}
 		}
 			
-		if (down_interruptible(&dev->sync)) {
-			return -ERESTARTSYS;
-		}	
 		to_copy = MIN_VALUE_OF(count, (BUFFER_SIZE - *offset));
 		pr_devel("cdrv: write: copy %zd bytes\n", to_copy);
 
@@ -542,6 +554,7 @@ static ssize_t mydev_write(struct file *filp, const char __user *buff, size_t co
  
 static long mydev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
 	my_cdev_t *dev = filp->private_data;
+	unsigned long old;
 	pr_devel("cdrv: ioctl: command %u\n", cmd);
 
 	if (_IOC_TYPE(cmd) != IOC_MY_MAGIC) {
@@ -603,9 +616,12 @@ static long mydev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) 
 			if (down_interruptible(&dev->sync)) {
 				return -ERESTARTSYS;
 			}
+			old = dev->allowed_max_readers;
 			dev->allowed_max_readers = arg;
 			pr_devel("cdrv: limit for open reads set to %ld\n", arg);
-			
+			up(&dev->sync);
+			return old;
+
 		default:
 			pr_info("cdrv: ioctl: unknown command\n");
 			return -ENOIOCTLCMD;

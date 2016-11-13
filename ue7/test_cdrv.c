@@ -1,5 +1,6 @@
-#define _XOPEN_SOURCE 500
+// used test programm by Clemens Jung (is151014) for testing my program
 
+#define _XOPEN_SOURCE 500
 
 #include <stdio.h>
 #include <stdlib.h>
