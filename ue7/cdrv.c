@@ -13,6 +13,7 @@
 #include <linux/device.h>
 #include <linux/wait.h>
 #include <linux/sched.h>
+#include <linux/seq_file.h>
 
 #include <linux/init.h>
 #include <linux/module.h>
@@ -34,6 +35,9 @@ MODULE_LICENSE("Dual BSD/GPL");
 #define PROC_FILE_NAME "info"
 #define READ_TIME 1
 #define WRITE_TIME 2
+
+#define MIN_VALUE_OF(a,b) ( (a) > (b) ? (b) : (a))
+
 
 static int __init cdrv_init(void);
 static void __exit cdrv_exit(void);
@@ -83,10 +87,10 @@ static struct seq_operations my_seq_ops = {
 // diese Struktur existiert pro device
 typedef struct my_cdev {
 	char *buffer;						// zeigt auf den buffer mit 1024 bytes
-	int current_length;	
+	size_t current_length;	
 	int write_opened;
 	int read_count;
-	int read_max_open;
+	unsigned long read_max_open;
 
 	int open_syscall_count;
 	int read_syscall_count;
@@ -98,7 +102,8 @@ typedef struct my_cdev {
 	long time_write_sec;
 	long time_write_nsec;
 
-
+	wait_queue_head_t rwq;
+	wait_queue_head_t ioctl_cleared;	
 	struct semaphore sync;	// zum sync der daten im device
 	dev_t dev_num;					// entspricht u32 bzw uint32_t
 	// wird vom kernel benoetigt
@@ -169,8 +174,10 @@ static int __init cdrv_init(void)
 		my_devs[i].time_write_sec = 0;
 		my_devs[i].time_write_nsec = 0;
 
-		// initialisieren des semaphors
+		// initialisieren des semaphors und wait queues
 		sema_init(&my_devs[i].sync, 1);
+		init_waitqueue_head(&my_devs[i].rwq);
+		init_waitqueue_head(&my_devs[i].ioctl_cleared);
 
 		if(device_create(my_class, NULL, cur_devnr, NULL, "mydev%d", MINOR(cur_devnr)) == (struct device *)ERR_PTR) {
 			pr_warn("cdrv: device creation failed!\n");
@@ -285,10 +292,9 @@ static int mydev_release(struct inode *inode, struct file *filp) {
 
 static ssize_t mydev_read(struct file *filp, char __user *buff, size_t count, loff_t *offset){
 	my_cdev_t *dev = filp->private_data;
-	int allowed_count;
-	int to_copy;
-	int not_copied;
-	int rdbytes = 0;
+	size_t to_read;
+	unsigned long not_copied;
+	size_t rdbytes = 0;
 	
 	long sec;
 	long nsec; 
@@ -345,13 +351,16 @@ static ssize_t mydev_read(struct file *filp, char __user *buff, size_t count, lo
 			return 0;	
 		}	
 	}
-	pr_devel("cdrv: read: FMODE_NDLAY: %d, may not block %d, O_NDELAY: %d, O_NONBLOCK: %d\n", filep->f_flags & FMODE_NDELAY, filep->f_flags & MAY_NOT_BLOCK, filep->f_flags & O_NDELAY, filep->f_flags & O_NONBLOCK);
-
+	pr_devel("cdrv: read: FMODE_NDLAY: %d, may not block %d, O_NDELAY: %d, O_NONBLOCK: %d\n", filp->f_flags & FMODE_NDELAY, filp->f_flags & MAY_NOT_BLOCK, filp->f_flags & O_NDELAY, filp->f_flags & O_NONBLOCK);
+	up(&dev->sync);
 	
 	do {
-		pr_devel("cdrv: read: already read: %zd, count=%zd\n", already_read, count);
+		if (down_interruptible(&dev->sync)) {
+			return -ERESTARTSYS;
+		}
+		pr_devel("cdrv: read: already read: %zd, count=%zd\n", rdbytes, count);
 		if (*offset >= dev->current_length) {
-			pr_devel("cdrv: read: open write-processes: %ld\n", dev->write_opened);
+			pr_devel("cdrv: read: open write-processes: %d\n", dev->write_opened);
 			if (filp->f_flags & O_NONBLOCK || dev->write_opened == 0) {
 				calc_time_diff(&start_time, &end_time, &sec, &nsec); 
 				add_syscall_time(dev, sec, nsec, READ_TIME); 
@@ -360,11 +369,11 @@ static ssize_t mydev_read(struct file *filp, char __user *buff, size_t count, lo
 			}
 			else {
 				pr_devel("cdrv: read: now at offset %lld and nothing more in buffer\n", *offset);
-				pr_devel("cdrv: read: number of writers was: %ld\n", dev->write_opened);
-				up(%dev->sync);
+				pr_devel("cdrv: read: number of writers was: %d\n", dev->write_opened);
+				up(&dev->sync);
 				end_time = current_kernel_time();
 				pr_devel("cdrv: read: waiting until file gets modified %ld.%09ld\n", end_time.tv_sec, end_time.tv_nsec);
-				wait_event_interruptible(dev->rwq, (*offset < dev->current_length || dev->write_opened == 0);
+				wait_event_interruptible(dev->rwq, (*offset < dev->current_length || dev->write_opened == 0));
 				pr_devel("cdrv: read: woke up\n");
 				end_time = current_kernel_time();
 				pr_info("cdrv: read: file was modified  %ld.%09ld\n", end_time.tv_sec, end_time.tv_nsec);
@@ -372,16 +381,29 @@ static ssize_t mydev_read(struct file *filp, char __user *buff, size_t count, lo
 				continue;
 			}
 		}
-	} while ();
+		to_read = MIN_VALUE_OF(count-rdbytes, dev->current_length - *offset);
+		pr_devel("cdrv: read: read %zd bytes\n", to_read);
+		not_copied = copy_to_user(buff, (dev->buffer + *offset), (unsigned long) to_read);
+		if (not_copied != 0) {
+			pr_devel("cdrv: read: count not read %lu bytes\n", not_copied);
+			to_read -= not_copied;
+		}
+		*offset += to_read;
+		rdbytes += to_read;
+		up(&dev->sync);
+	} while (rdbytes < count);
 		
 	mdelay(100L); // dealy 100 millisecs
 	end_time = current_kernel_time();
+	if (down_interruptible(&dev->sync)) {
+		return -ERESTARTSYS;
+	}
 	calc_time_diff(&start_time, &end_time, &sec, &nsec); 
 	add_syscall_time(dev, sec, nsec, READ_TIME); 
 
 	up(&dev->sync);
 
-	return *offset;
+	return rdbytes;
 }
 
 static ssize_t mydev_write(struct file *filp, const char __user *buff, size_t count, loff_t *offset) {
@@ -532,7 +554,7 @@ static int my_show(struct seq_file *sf, void *it) {
 	seq_printf(sf, "   Read count: %d\n", dev->read_syscall_count);
 	seq_printf(sf, "   Write count: %d\n", dev->write_syscall_count);
 	seq_printf(sf, "   Close count: %d\n", dev->close_syscall_count);
-	seq_printf(sf, "   Current lenth: %d\n", dev->current_length);
+	seq_printf(sf, "   Current lenth: %ld\n", dev->current_length);
 	seq_printf(sf, "   Time reading: %ld.%09ld\n", dev->time_read_sec, dev->time_read_nsec);
 	seq_printf(sf, "   Time writing: %ld.%09ld\n\n", dev->time_write_sec, dev->time_write_nsec);
 	up(&dev->sync);	
