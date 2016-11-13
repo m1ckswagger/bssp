@@ -96,6 +96,7 @@ typedef struct my_cdev {
 	int read_syscall_count;
 	int write_syscall_count;
 	int close_syscall_count;
+	int clear_count;
 	
 	long time_read_sec;
 	long time_read_nsec;
@@ -122,7 +123,7 @@ static int __init cdrv_init(void)
 	int result;
 	int i;
 
-	printk(KERN_INFO "cdrv: Hello, kernel world!\n");
+	pr_info("cdrv: Hello, kernel world!\n");
 	
 	my_devs = kmalloc(sizeof(my_cdev_t) * MINOR_COUNT, GFP_KERNEL);
 	if(!my_devs) {
@@ -140,7 +141,7 @@ static int __init cdrv_init(void)
 
 	proc_parent = proc_mkdir(PROC_DIR_NAME, NULL);
 	if (!proc_parent) {
-		printk(KERN_ERR "cdrv: create proc dir failed\n");
+		pr_devel(KERN_ERR "cdrv: create proc dir failed\n");
 		goto proc_err_1;
 	}
 	proc_entry = proc_create_data(PROC_FILE_NAME, 0664, proc_parent, &my_proc_fcalls, NULL);
@@ -168,6 +169,7 @@ static int __init cdrv_init(void)
 		my_devs[i].read_syscall_count = 0;
 		my_devs[i].write_syscall_count = 0;
 		my_devs[i].close_syscall_count = 0;
+		my_devs[i].clear_count = 0;
 		
 		my_devs[i].time_read_sec = 0;
 		my_devs[i].time_read_nsec = 0;
@@ -208,14 +210,14 @@ static void __exit cdrv_exit(void) {
 	remove_proc_entry(PROC_DIR_NAME, NULL);
 		
 
-	printk(KERN_INFO "cdrv: Goodbye, kernel world!\n");
+	pr_info("cdrv: Goodbye, kernel world!\n");
 	for(i = 0; i < MINOR_COUNT; i++) {
 		device_destroy(my_class, my_devs[i].cdev.dev);
 		cdev_del(&my_devs[i].cdev);
 		if(my_devs[i].buffer) {
 			kfree(my_devs[i].buffer);
 		}
-		printk("cdrv: cleanup device %d\n", i);
+		pr_devel("cdrv: cleanup device %d\n", i);
 	}
 	
 	class_destroy(my_class);
@@ -302,7 +304,7 @@ static ssize_t mydev_read(struct file *filp, char __user *buff, size_t count, lo
 	struct timespec end_time;;
 
 	start_time = current_kernel_time();
-	// printk("time sec %ld, nsec %09ld\n", ts.tv_sec, ts.tv_nsec);
+	// pr_devel("time sec %ld, nsec %09ld\n", ts.tv_sec, ts.tv_nsec);
 
 	if (down_interruptible(&dev->sync)) {
 		return -ERESTARTSYS;
@@ -311,6 +313,7 @@ static ssize_t mydev_read(struct file *filp, char __user *buff, size_t count, lo
 
 	if (buff == NULL) {
 		pr_devel("cdrv: read: got NULL buffer\n");
+		end_time = current_kernel_time();
 		calc_time_diff(&start_time, &end_time, &sec, &nsec); 
 		add_syscall_time(dev, sec, nsec, READ_TIME); 
 		up(&dev->sync);	
@@ -318,6 +321,7 @@ static ssize_t mydev_read(struct file *filp, char __user *buff, size_t count, lo
 	}
 	else if (count == 0) {
 		pr_devel("cdrv: read: nothing requested\n");
+		end_time = current_kernel_time();
 		calc_time_diff(&start_time, &end_time, &sec, &nsec); 
 		add_syscall_time(dev, sec, nsec, READ_TIME); 
 		up(&dev->sync);	
@@ -325,6 +329,7 @@ static ssize_t mydev_read(struct file *filp, char __user *buff, size_t count, lo
 	}
 	else if (*offset > BUFFER_SIZE) {
 		pr_devel("cdrv: read: given offset is out of buffer range\n");
+		end_time = current_kernel_time();
 		calc_time_diff(&start_time, &end_time, &sec, &nsec); 
 		add_syscall_time(dev, sec, nsec, READ_TIME); 
 		up(&dev->sync);	
@@ -332,6 +337,7 @@ static ssize_t mydev_read(struct file *filp, char __user *buff, size_t count, lo
 	}
 	else if (*offset == BUFFER_SIZE) {
 		pr_devel("cdrv: read: given offset is exactly buffersize (%lld)\n", *offset);
+		end_time = current_kernel_time();
 		calc_time_diff(&start_time, &end_time, &sec, &nsec); 
 		add_syscall_time(dev, sec, nsec, READ_TIME); 
 		up(&dev->sync);	
@@ -345,6 +351,7 @@ static ssize_t mydev_read(struct file *filp, char __user *buff, size_t count, lo
 		pr_devel("cdrv: read: request way too much - reduced count to %zd\n", count);
 		if (count == 0) {
 			pr_devel("cdrv: read: due to reduction nothing requested\n");
+			end_time = current_kernel_time();
 			calc_time_diff(&start_time, &end_time, &sec, &nsec); 
 			add_syscall_time(dev, sec, nsec, READ_TIME); 
 			up(&dev->sync);	
@@ -362,6 +369,7 @@ static ssize_t mydev_read(struct file *filp, char __user *buff, size_t count, lo
 		if (*offset >= dev->current_length) {
 			pr_devel("cdrv: read: open write-processes: %d\n", dev->write_opened);
 			if (filp->f_flags & O_NONBLOCK || dev->write_opened == 0) {
+				end_time = current_kernel_time();
 				calc_time_diff(&start_time, &end_time, &sec, &nsec); 
 				add_syscall_time(dev, sec, nsec, READ_TIME); 
 				up(&dev->sync);	
@@ -408,10 +416,11 @@ static ssize_t mydev_read(struct file *filp, char __user *buff, size_t count, lo
 
 static ssize_t mydev_write(struct file *filp, const char __user *buff, size_t count, loff_t *offset) {
 	my_cdev_t *dev = filp->private_data;
-	int to_copy;
-	int allowed_count;
-	int not_copied;
-	int length;	
+	size_t to_copy;
+	size_t final_position = 0;
+	size_t copied_total = 0;
+	unsigned long not_copied;
+
 	long sec;
 	long nsec; 
 	struct timespec start_time;
@@ -419,99 +428,183 @@ static ssize_t mydev_write(struct file *filp, const char __user *buff, size_t co
 
 	start_time = current_kernel_time();
 
+	pr_devel("cdrv: write: requested count: %lu, offset: %lld\n", count, *offset);
 	if (down_interruptible(&dev->sync)) {
 		return -ERESTARTSYS;
 	}
 	(dev->write_syscall_count)++;	
 
-	// jump always to the end
-	*offset = dev->current_length;
-	allowed_count = BUFFER_SIZE - *offset;
-	to_copy = (allowed_count < count) ? allowed_count : count;
-
-	// copy_from_user liefert die anzahl der bytes, die nicht gelesen werden konnten
-	not_copied = copy_from_user(dev->buffer + *offset, buff, to_copy);	
-	length = *offset + (to_copy - not_copied);		// akt pos nach dem write (ohne lenght moeglich)
-
-	if (dev->current_length < length) {
-		dev->current_length = length;
+	if (buff == NULL) {
+		pr_devel("cdrv: write: got NULL buffer\n");
+		end_time = current_kernel_time();
+		calc_time_diff(&start_time, &end_time, &sec, &nsec); 
+		add_syscall_time(dev, sec, nsec, WRITE_TIME); 
+		up(&dev->sync);
+		return -EINVAL;
 	}
-
-	*offset += (to_copy - not_copied);
+	else if (*offset > BUFFER_SIZE) {
+		pr_devel("cdrv: write: given offset %lld was out of buffer range (%d)\n", *offset, BUFFER_SIZE);
+		end_time = current_kernel_time();
+		calc_time_diff(&start_time, &end_time, &sec, &nsec); 
+		add_syscall_time(dev, sec, nsec, WRITE_TIME); 
+		up(&dev->sync);
+		return -ESPIPE; 	
+	}
+	else if (*offset == BUFFER_SIZE && (filp->f_flags & O_NONBLOCK)) {
+		pr_devel("cdrv: write: offset was exactly buffersize (%lld)\n", *offset);
+		end_time = current_kernel_time();
+		calc_time_diff(&start_time, &end_time, &sec, &nsec); 
+		add_syscall_time(dev, sec, nsec, WRITE_TIME); 
+		up(&dev->sync);
+		return 0;
+	}
+	else if (count == 0) {
+		pr_devel("cdrv: write: user requested 0 bytes\n");
+		end_time = current_kernel_time();
+		calc_time_diff(&start_time, &end_time, &sec, &nsec); 
+		add_syscall_time(dev, sec, nsec, WRITE_TIME); 
+		up(&dev->sync);
+		return 0;
+	}
+	up(&dev->sync);
 
 	mdelay(100L); // dealy 100 millisecs
+	
+	while (count > 0) {
+		if (*offset >= BUFFER_SIZE) {
+			if (filp->f_flags & O_NONBLOCK) {
+				if (down_interruptible(&dev->sync)) {
+					return -ERESTARTSYS;
+				}	
+				end_time = current_kernel_time();
+				calc_time_diff(&start_time, &end_time, &sec, &nsec); 
+				add_syscall_time(dev, sec, nsec, WRITE_TIME); 
+				up(&dev->sync);	
+				return copied_total;
+			}
+			else {
+				pr_devel("cdrv: write: wait for ioctl\n");
+				end_time = current_kernel_time();
+				pr_info("cdrv: write: waiting started until the buffer get flushed %ld.%09ld\n", end_time.tv_sec, end_time.tv_nsec);
+				wait_event_interruptible(dev->ioctl_cleared, (dev->current_length != BUFFER_SIZE));
+				pr_devel("cdrv: write: ioctl done\n");
+				end_time = current_kernel_time();
+				pr_info("cdrv: write: waiting finished the buffer was flushed %ld.%09ld\n", end_time.tv_sec, end_time.tv_nsec);
+				*offset = 0;
+			}
+		}
+			
+		if (down_interruptible(&dev->sync)) {
+			return -ERESTARTSYS;
+		}	
+		to_copy = MIN_VALUE_OF(count, (BUFFER_SIZE - *offset));
+		pr_devel("cdrv: write: copy %zd bytes\n", to_copy);
+
+		not_copied = copy_from_user(dev->buffer + *offset, buff+copied_total, to_copy);
+		if (not_copied != 0) {
+			pr_devel("cdrv: write: could not copy %lu bytes\n", not_copied);
+			to_copy -= not_copied;
+		}
+		
+		final_position = *offset + to_copy;
+		if (dev->current_length < final_position) {
+			dev->current_length = final_position;
+		}
+		*offset += to_copy;
+		
+		count -= to_copy;
+		up(&dev->sync);
+		copied_total += to_copy;
+	}
+	
+	if (to_copy > 0) {
+		pr_devel("cdrv: write: waking up clients\n");
+		wake_up_all(&dev->rwq);
+		pr_devel("cdrv: write: woke up the clients\n");
+	}
 	end_time = current_kernel_time();
+	if (down_interruptible(&dev->sync)) {
+		return -ERESTARTSYS;
+	}	
 	calc_time_diff(&start_time, &end_time, &sec, &nsec); 
 	add_syscall_time(dev, sec, nsec, WRITE_TIME); 
 
 	up(&dev->sync);	
 
-	return to_copy - not_copied;
+	return copied_total;
 }
  
 static long mydev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
 	my_cdev_t *dev = filp->private_data;
+	pr_devel("cdrv: ioctl: command %u\n", cmd);
+
 	if (_IOC_TYPE(cmd) != IOC_MY_MAGIC) {
-		return -1;
+		pr_info("cdrv: ioctl: wrong magic number! was %u instead of %d\n", _IOC_TYPE(cmd), IOC_MY_MAGIC);
+		return -EINVAL;
   }
 	switch (_IOC_NR(cmd)) {
 		case IOC_NR_OPENREADCNT:
 			if (_IOC_DIR(cmd) != _IOC_NONE) {
-				printk("cdrv: Wrong direction. Must be \"no data transfer\"!\n");
+				pr_devel("cdrv: ioctl: wrong direction. must be \"no data transfer\"!\n");
 				break;
 			}
 			if (down_interruptible(&dev->sync)) {
 				return -ERESTARTSYS;
 			}	
-			printk("cdrv: The device is currently opened %d times for read\n", dev->read_count);
+			pr_info("cdrv: ioctl: the device is currently opened %d times for read\n", dev->read_count);
 			up(&dev->sync);
-			break;			
+			return dev->read_count;			
 
 		case IOC_NR_OPENWRITE:
 			if (_IOC_DIR(cmd) != _IOC_NONE) {
-				printk("cdrv: Wrong direction. Must be \"no data transfer\"!\n");
+				pr_devel("cdrv: ioctl: wrong direction. must be \"no data transfer\"!\n");
 				break;
 			}
 			if (down_interruptible(&dev->sync)) {
 				return -ERESTARTSYS;
 			}
 			if (dev->write_opened) {
-				printk("cdrv: The device is currently opened for write\n");
+				pr_info("cdrv: ioctl: the device is currently opened for write\n");
 			}
 			else {
-				printk("cdrv: The device is currently not opened for write\n");
+				pr_info("cdrv: ioctl: the device is currently not opened for write\n");
 			}
 			up(&dev->sync);
-			break;
+			return dev->write_opened;
 
 
 		case IOC_NR_CLEAR:
 			if (_IOC_DIR(cmd) != _IOC_NONE) {
-				printk("cdrv: Wrong direction. Must be \"no data transfer\"!\n");
+				pr_devel("cdrv: ioctl: wrong direction. must be \"no data transfer\"!\n");
 				break;
 			}
 			if (down_interruptible(&dev->sync)) {
 				return -ERESTARTSYS;
 			}
+			pr_info("cdrv: ioctl: resetting device\n");
 			dev->current_length = 0;
+			(dev->clear_count)++;
+			wake_up_all(&dev->ioctl_cleared);
+			pr_devel("cdrv: ioctl: completed clear\n");
 			up(&dev->sync);
-			break;
+			return 0;
 		
 		case IOC_NR_READ_MAX_OPEN:
 			if (_IOC_DIR(cmd) != _IOC_WRITE) {
-				printk(KERN_ERR "WRONG direction for ioctl with IOC_IGNORE_MODE\n");
+				pr_devel("cdrv: ioctl: wrong direction for ioctl with IOC_IGNORE_MODE\n");
 				break;
 			}
 			if (down_interruptible(&dev->sync)) {
 				return -ERESTARTSYS;
 			}
 			dev->read_max_open = arg;
-			printk("cdrv: limit for open reads set to %ld\n", arg);
+			pr_devel("cdrv: limit for open reads set to %ld\n", arg);
 			
 		default:
-			printk("cdrv: ioctl: unknown operation\n");
+			pr_info("cdrv: ioctl: unknown command\n");
+			return -ENOIOCTLCMD;
 	}
-	return 0;
+	return -EINVAL;
 } 
 
 static int my_seq_file_open(struct inode *inode, struct file *filp) {
@@ -568,9 +661,9 @@ static void my_stop(struct seq_file *sf, void *it) {
 
 static void calc_time_diff(struct timespec *start_time, struct timespec *end_time, long *sec, long *nsec) {
 	long nsec_diff;
-	printk("cdrv: entered calc_time_diff\n");
-	printk("   Time start: %ld.%09ld\n", start_time->tv_sec, start_time->tv_nsec);
-	printk("   Time end  : %ld.%09ld\n", end_time->tv_sec, end_time->tv_nsec);
+	pr_devel("cdrv: calc_time_diff: entered\n");
+	pr_devel("   Time start: %ld.%09ld\n", start_time->tv_sec, start_time->tv_nsec);
+	pr_devel("   Time end  : %ld.%09ld\n", end_time->tv_sec, end_time->tv_nsec);
 	*sec = end_time->tv_sec - start_time->tv_sec;
 	nsec_diff = end_time->tv_nsec - start_time->tv_nsec;
 	if (nsec_diff < 0) {
@@ -580,12 +673,12 @@ static void calc_time_diff(struct timespec *start_time, struct timespec *end_tim
 	else {
 		*nsec = nsec_diff;
 	}  
-	printk("   Difference: %ld.%09ld\n", *sec, *nsec);
+	pr_devel("   Difference: %ld.%09ld\n", *sec, *nsec);
 }
 
 static void add_syscall_time(my_cdev_t *dev, long sec, long nsec, int type) {
-	// int index = dev - my_devs;
-	//printk("entered add_syscall_time\n");	
+	int index = dev - my_devs;
+	pr_devel("cdrv: add_syscall_time: entered\n");	
 	switch (type) {
 		case READ_TIME:
 			dev->time_read_sec += sec;
@@ -594,7 +687,7 @@ static void add_syscall_time(my_cdev_t *dev, long sec, long nsec, int type) {
 				dev->time_read_sec += 1;
 				dev->time_read_nsec -= 1000000000;
 			}
-			//printk("Calculating read time for mydev%d\n", index + MINOR_START);			
+			pr_devel("cdrv: add_syscall_time: calculating read time for mydev%d\n", index + MINOR_START);			
 			break;
 
 		case WRITE_TIME:
@@ -604,7 +697,7 @@ static void add_syscall_time(my_cdev_t *dev, long sec, long nsec, int type) {
 				dev->time_write_sec += 1;
 				dev->time_write_nsec -= 1000000000;
 			}
-			//printk("Calculating write time for mydev%d\n", index + MINOR_START);			
+			pr_devel("cdrv: add_syscall_time: calculating write time for mydev%d\n", index + MINOR_START);			
 			break;
 
 		default:
