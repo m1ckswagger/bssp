@@ -89,8 +89,8 @@ typedef struct my_cdev {
 	char *buffer;						// zeigt auf den buffer mit 1024 bytes
 	size_t current_length;	
 	int write_opened;
-	int read_count;
-	unsigned long read_max_open;
+	long reader_count;
+	unsigned long allowed_max_readers;
 
 	int open_syscall_count;
 	int read_syscall_count;
@@ -162,8 +162,8 @@ static int __init cdrv_init(void)
 		my_devs[i].current_length = 0;
 		my_devs[i].buffer = NULL;
 		my_devs[i].write_opened = 0;
-		my_devs[i].read_count = 0;
-		my_devs[i].read_max_open = 0;
+		my_devs[i].reader_count = 0;
+		my_devs[i].allowed_max_readers = 0;
 
 		my_devs[i].open_syscall_count = 0;
 		my_devs[i].read_syscall_count = 0;
@@ -259,10 +259,16 @@ static int mydev_open(struct inode *inode, struct file *filp) {
 	}
 	else if (filp->f_mode & FMODE_READ) {		// FMODE_READ --> mit lesen geoeffnet
 		if (!dev->buffer) {
+			pr_info("cdrv: open: device must be opened for write before you can read\n");
 			up(&dev->sync);		
-			return -EPERM;
+			return -ENOSR;
 		}
-		dev->read_count += 1;
+		if (dev->allowed_max_readers > 0 && dev->reader_count >= dev->allowed_max_readers) {
+			pr_devel("cdrv: open: allowed readers are %lu but there are %ld\n", dev->allowed_max_readers, dev->reader_count+1);
+			up(&dev->sync);
+			return -EBUSY;
+		}
+		dev->reader_count += 1;
 	}
 	// freigeben des Semaphores
 	up(&dev->sync);
@@ -283,7 +289,7 @@ static int mydev_release(struct inode *inode, struct file *filp) {
 		dev->write_opened = 0;
 	}
 	if (filp->f_mode & FMODE_READ) {
-		dev->read_count -= 1;
+		dev->reader_count -= 1;
 	}
 	pr_info("cdrv: mydev%d closed\n", MINOR(dev->dev_num));
 
@@ -551,9 +557,9 @@ static long mydev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) 
 			if (down_interruptible(&dev->sync)) {
 				return -ERESTARTSYS;
 			}	
-			pr_info("cdrv: ioctl: the device is currently opened %d times for read\n", dev->read_count);
+			pr_info("cdrv: ioctl: the device is currently opened %ld times for read\n", dev->reader_count);
 			up(&dev->sync);
-			return dev->read_count;			
+			return dev->reader_count;			
 
 		case IOC_NR_OPENWRITE:
 			if (_IOC_DIR(cmd) != _IOC_NONE) {
@@ -597,7 +603,7 @@ static long mydev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) 
 			if (down_interruptible(&dev->sync)) {
 				return -ERESTARTSYS;
 			}
-			dev->read_max_open = arg;
+			dev->allowed_max_readers = arg;
 			pr_devel("cdrv: limit for open reads set to %ld\n", arg);
 			
 		default:
