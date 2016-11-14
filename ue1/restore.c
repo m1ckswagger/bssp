@@ -71,8 +71,8 @@ int read_signature(int fd) {
 	char name[7];
 	int i;
 	time_t bday;
-	struct tm *birthday;
 	size_t rdbytes;
+	//struct tm *birthday;
 
 	for(i = 0; i < 6; i++) {
 		if(read(fd, &buf, 1) == -1) {
@@ -91,7 +91,7 @@ int read_signature(int fd) {
 		return -1;
 	}
 
-	birthday = localtime(&bday);
+	//birthday = localtime(&bday);
 	printf("Name: %s\n", name);
 	printf("Geb.: %s\n", asctime(localtime(&bday)));
 
@@ -157,11 +157,9 @@ int read_inode_and_name(struct stat *inode, int sfd, char *src_file_name) {
 
 int process_dir(const char *work, const struct stat *src_inode, int sfd)
 {
-  char src_file_name[MAXPATHNAME];
 	char new_file_name[MAXPATHNAME];
 	struct stat new_node;
-	int i = 0;
-	
+
 	if (mkdir(work, src_inode->st_mode) == -1) {
 		fprintf(stderr, "%s: Cannot create dir!\n", work);
 		perror("mkdir");
