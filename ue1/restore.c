@@ -12,32 +12,30 @@
 #define MAXNAME 25
 
 // Prototypes
-int read_inode_and_name(struct stat *inode, int sfd, char *srcFName);
+int read_inode_and_name(struct stat *inode, int sfd, char *src_file_name);
 int restore_file(struct stat *node, const char *name, int fd);
-int process_dir(const char *work, const struct stat *srcInode, int sfd);
+int process_dir(const char *work, const struct stat *src_inode, int sfd);
 int read_signature(int fd);
 int birthday_matches(struct tm *birthday);
 
 
 int main(int argc, char **argv) {
-	char *srcFPath;			// file path of source archive
-	char srcFName[BUFSZ];	// file name
-	int srcfd;					// file descriptor of source archive
+	char *src_file_path;			// file path of source archive
+	char src_file_name[BUFSZ];	// file name
+	int src_fd;					// file descriptor of source archive
 	int sig_code;				// code returned from signature
 	struct stat inode;
-
 	if(argc != 2) {
 		printf("Wrong arguments!\n");
 	}
-   srcFPath = argv[1];
+   src_file_path = argv[1];
 
 	// Lesen des uebergebenen archivs
-   srcfd = open(srcFPath, O_RDWR);
+   src_fd = open(src_file_path, O_RDWR);
 	
-
 	// ueberpruefen der signatur
 
-	if((sig_code = read_signature(srcfd)) == -1) {
+	if((sig_code = read_signature(src_fd)) == -1) {
 		fprintf(stderr, "Error reading signature!\n");
 		return -1;
 	}
@@ -47,32 +45,24 @@ int main(int argc, char **argv) {
 
 
 	// Abarbeiten aller Inodes im archiv
-	while(read_inode_and_name(&inode, srcfd, srcFName) != -1) {
+	while(read_inode_and_name(&inode, src_fd, src_file_name) != -1) {
 		if(S_ISDIR(inode.st_mode)) {
-			//printf("%s: Support for Directories not yet implemented.\n", srcFName);
-			printf("%s: Restoreing directory ...\n", srcFName);
-			if(mkdir(srcFName, inode.st_mode) == -1) {
-				//fprintf(stderr, "%s: Cannot create dir!\n", srcFName);
-				perror("mkdir");
-				return -1;
-			}
-			process_dir(srcFName, &inode, srcfd);
+			printf("Restoreing directory: %s \n", src_file_name);
+			process_dir(src_file_name, &inode, src_fd);
 		}
 		// Wiederherstellung eines files
 		else if(S_ISREG(inode.st_mode)) {
-			//printf("Inode read: %s!\n", srcFName);
-			//printf("Size: %ld\n", inode.st_size);
 			if(inode.st_nlink > 1) {
-				printf("%s: File has multiple hardlinks. Files will be seperately restored\n", srcFName);
+				printf("%s: File has multiple hardlinks. Files will be seperately restored\n", src_file_name);
 			}
-			if(restore_file(&inode, srcFName, srcfd) != -1) 
-				printf("%s: File restored.\n", srcFName);
+			if(restore_file(&inode, src_file_name, src_fd) != -1) 
+				printf("%s: File restored.\n", src_file_name);
 		}
 		else {
-			printf("%s: File type not supported!\n", srcFName);
+			printf("%s: File type not supported!\n", src_file_name);
 		}
 	}
-	close(srcfd);
+	close(src_fd);
    return 0;
 }
 
@@ -88,7 +78,6 @@ int read_signature(int fd) {
 		if(read(fd, &buf, 1) == -1) {
 			return -1;
 		}
-		//printf("%c" ,buf);
 		if(buf-'0' < 0 && buf-'0' > 9) {
 			lseek(fd, -1, SEEK_CUR);
 			break;
@@ -148,7 +137,7 @@ int restore_file(struct stat *node, const char *name, int fd) {
 
 
 // Auslesen von inode und name aus dem Archiv
-int read_inode_and_name(struct stat *inode, int sfd, char *srcFName) {
+int read_inode_and_name(struct stat *inode, int sfd, char *src_file_name) {
 	char buf[BUFSZ];	
 	int slen, rdbytes;
    if(read(sfd, inode, sizeof(struct stat)) != sizeof(struct stat)) {
@@ -158,7 +147,7 @@ int read_inode_and_name(struct stat *inode, int sfd, char *srcFName) {
 	rdbytes = read(sfd, buf, BUFSZ);
 	// feststellen der string laenge
 	for(slen = 0; buf[slen] != '\0'; slen++);
-   strncpy(srcFName, buf, slen+1);	
+   strncpy(src_file_name, buf, slen+1);	
 	
 	// zuruecksetzen des FD
 	lseek(sfd, rdbytes*-1, SEEK_CUR);
@@ -166,29 +155,26 @@ int read_inode_and_name(struct stat *inode, int sfd, char *srcFName) {
    return 1;
 }
 
-int process_dir(const char *work, const struct stat *srcInode, int sfd)
+int process_dir(const char *work, const struct stat *src_inode, int sfd)
 {
-   char srcFName[MAXPATHNAME];
-	char newFName[MAXPATHNAME];
-	struct stat newNode;
-   
+  char src_file_name[MAXPATHNAME];
+	char new_file_name[MAXPATHNAME];
+	struct stat new_node;
+	int i = 0;
 	
-	while(read_inode_and_name(&newNode, sfd, newFName) != -1) {
-		strcpy(srcFName, work);
-		if(S_ISDIR(newNode.st_mode)) {
-			strcat(srcFName, "/");
-			strcat(srcFName, newFName);
-			if(mkdir(srcFName, srcInode->st_mode) == -1) {
-				fprintf(stderr, "%s: Cannot create dir!\n", work);
-				//process_dir(work, srcInode, sfd);
-				return -1;
-			}
-			process_dir(srcFName, &newNode, sfd);
+	if (mkdir(work, src_inode->st_mode) == -1) {
+		fprintf(stderr, "%s: Cannot create dir!\n", work);
+		perror("mkdir");
+		return -1;
+	}
+	
+	while (read_inode_and_name(&new_node, sfd, new_file_name) != -1) {
+		if (S_ISDIR(new_node.st_mode)) {
+			printf("RESTORING %s with size %ld\n", new_file_name, new_node.st_size);	
+			process_dir(new_file_name, &new_node, sfd);
 		}
-		else if(S_ISREG(newNode.st_mode)) {
-			strcat(srcFName, "/");
-			strcat(srcFName, newFName);
-			restore_file(&newNode, srcFName, sfd);
+		else if(S_ISREG(new_node.st_mode)) {
+			restore_file(&new_node, new_file_name, sfd);
 		}
 	}
    return 0;
