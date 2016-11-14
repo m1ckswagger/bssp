@@ -1,13 +1,13 @@
 CFLAGS=-Wall
 
-all: socketserver client
+all: chatserver chatclient
 
-socketserver: socketserver.c
-	gcc $(CFLAGS) socketserver.c -lpthread -o socksrv
+chatserver: server_chatsystem.c
+	gcc $(CFLAGS) server_chatsystem.c -lpthread -o chatserver
 			
-client: client.c
-	gcc $(CFLAGS) client.c -lpthread -o client
+chatclient: client_chatsystem.c
+	gcc $(CFLAGS) client_chatsystem.c -lpthread -o client
 
 clean:
-	rm -f bkup
+	rm -f chatserver client
 
