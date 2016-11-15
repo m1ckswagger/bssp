@@ -25,25 +25,35 @@
 #define MAXARGS 200
 #define BUFSZ 1024
 
+typedef struct process_env {
+	char pwd[MAXPATHNAME];
+	int pwd_fd;
+	int umask;
+	char path[MAXPATHNAME];
+} process_env_t;
+
+
 void signal_handler(int sig);
-void reset_signal();
-void handle_umask(char **argvec, const unsigned argc);
-void handle_setpath(char **argvec, const unsigned argc);
-void handle_info(time_t start_time);
 void clean_up_child_process();
-void handle_cd(char **argvec, const unsigned argc, char *workdir); 
-void show_prompt();
-int show_prompt_socket(int fd, struct utsname uname_data, char *pwd);
-void handle_getprot(char **argvec, int argc, char *log_path); 
-void* handle_client(void* fd);
-int read_input_s(char *cmdline, int fd);
-void read_input(char *cmdline);
+
+void *handle_client(void *args);
+int handle_commands(char **argvec, int argc, time_t start_time, int background, char*     client_ip, FILE *socket_in, FILE *socket_out, process_env_t *process_env);
+int handle_umask(char **argvec, const unsigned argc, FILE *socket_out, process_env_t *    process_env);
+int handle_setpath(char **argvec, const unsigned argc, FILE *socket_out, process_env_t     *process_env);
+int handle_info(time_t start_time, FILE *socket_out);
+int handle_cd(char **argvec, const unsigned argc, process_env_t *process_env);
+int handle_getprot(char **argvec, int argc, char *log_path, FILE *socket_out);
+
+void show_prompt(FILE *socket_out, char *pwd);
 void get_commands(char *cmdline, char **argvec, int *argc);
+void read_input(FILE *socket_in, char *cmdline);
 int is_background(char **argvec, int argc);
-void start_shellserver();
-int handle_commands(char **argvec, int argc, time_t start_time, int background, int client_fd, char *pwd);
+int get_ipv4(int fd, char *client_ip);
 
 
+char user_name[MAXUSERNAME];
+struct utsname uname_data;
+time_t start_time;
 pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 
 int main() {
@@ -80,31 +90,10 @@ int main() {
       perror("accept");
       exit(1);
     }
-		//printf("FD is: %d\n", clientfd);	
-		dup2( clientfd, STDOUT_FILENO );  
-		dup2( clientfd, STDERR_FILENO );
-		dup2( clientfd, STDIN_FILENO );
 		err=pthread_create(&thr_id, NULL, handle_client, (void *)clientfd);
-		if(err)
+		if (err)
 			printf("Threaderzeugung: %s\n", strerror(err)); 
-    /*switch(pid = fork()) {
-      case -1:
-        perror("fork");
-        break;
-      case 0:
-        dup2( clientfd, STDOUT_FILENO );  
-        dup2( clientfd, STDERR_FILENO );
-        handle_client(clientfd);
-        exit(1);
-        break;
-      default:
-        signal(SIGCHLD, clean_up_ehild_process);
-        close(clientfd);
-        break;
-    }
-		*/
-		//signal(SIGCHLD, clean_up_child_process);
-   // close(clientfd);
+    
   }
 	return 0;
 }
@@ -138,37 +127,48 @@ int get_ipv4(int fd, char *client_ip) {
 void *handle_client(void *arg) {
   char cmdline[MAXCMDLINE];
   char *argvec[MAXARGS];
-  int i, background;
-  time_t start_time;
+	char client_ip[20];
+	char *path;
+	int i; 
+	int background;
 	int fd;
-
-	//char pwd[MAXPATHNAME];
-	char *pwd;
+	int prev_umask;
+  time_t start_time;
+	fd = (int) arg;
+	FILE *socket_in = fdopen(fd, "r");
+	FILE *socket_out = fdopen(fd, "w");
+	process_env_t process_env;	
 	struct utsname uname_data;
 
-	fd = (int)arg;
-	printf("FD: %d\n", fd);
-	pwd = getcwd(pwd, MAXPATHNAME);	
+
+	// set path for current thread
+	path = getenv("PATH");
+	if (path != NULL && ((strlen(path)+1) < sizeof(process_env.path))) {
+		strcpy(process_env.path, path);
+	}
 	uname(&uname_data);
   time(&start_time);
-		
-	dup2( fd, STDOUT_FILENO );  
-	dup2( fd, STDERR_FILENO );
-	dup2( fd, STDIN_FILENO );
-	
-	fflush(stdout);
-  for (;;) {
-    if(show_prompt_socket(fd, uname_data, pwd) == -1) {
-			printf("Error showing prompt!\n");
-			fflush(stdout);
-      return NULL;
-    }
+	getlogin_r(user_name, sizeof(user_name));
+	// set umask for the current thread
+	prev_umask = umask(0);
+	process_env.umask = prev_umask;
+	umask(prev_umask);
 
-    if(read_input_s(cmdline, fd) == -1) {
-			printf("Error reading line!\n");
-			fflush(stdout);
-      return NULL;
-    }
+	// set working dir for the current thread
+	getcwd(process_env.pwd, sizeof(process_env.pwd));
+	if((process_env.pwd_fd = open(process_env.pwd, O_DIRECTORY)) == -1) {
+		return NULL;
+	}	
+	
+	// get the ipv4 address of the client
+	if (get_ipv4(fd, client_ip) == -1) {
+		fprintf(socket_out, "get_ipv4: %s\n", strerror(errno));
+		return NULL;
+	}
+
+	for (;;) {
+    show_prompt(socket_out, process_env.pwd);
+    read_input(socket_in, cmdline);
 
     // show prompt when \n was pressed
     if (strlen(cmdline) < 1) {
@@ -177,87 +177,124 @@ void *handle_client(void *arg) {
 
     // Commandozeile in Worte Zerlegen und expandieren
     get_commands(cmdline, argvec, &i);
-		/*
-		for(j=0; j < i; j++) {
-			printf("%d:%s\n", j, argvec[j]);
-		}
-		fflush(stdout);
-		*/
     background = is_background(argvec, i);
 
-    if(handle_commands(argvec, i, start_time, background, fd, pwd) == 1) {
-      return 0;
+    if(handle_commands(argvec, i, start_time, background, client_ip, socket_in, socket_out, &process_env) == 1) {
+      fclose(socket_in);
+			fclose(socket_out);
+			close(fd);
+			break;
     }
-
   }
-	printf("Thread completed!\n");
   return NULL;
 }
 
-int handle_commands(char **argvec, int argc, time_t start_time, int background, int client_fd, char *pwd) {
+int handle_commands(char **argvec, int argc, time_t start_time, int background, 
+										char *ipv4, FILE *socket_in, FILE *socket_out, process_env_t *process_env) {
   int pid, status;
-	int i;
+	int i, success;
 	int log_fd;
 	char log_path[] = "/var/log/is151002_threads";
-	char ipv4[20];
 	
   if (!strcmp(argvec[0], "exit")) {
     printf("bye, bye\n");
     return 1;
-  } else if (!strcmp(argvec[0], "cd")) {
-    handle_cd(argvec, argc, pwd);
-  } else if(!strcmp(argvec[0], "umask")) {
-    handle_umask(argvec, argc);
-  } else if(!strcmp(argvec[0], "setpath")) {
-    handle_setpath(argvec, argc);
-  } else if(!strcmp(argvec[0], "info")) {
-    handle_info(start_time);
-  } else if(!strcmp(argvec[0], "getprot")) {
-		handle_getprot(argvec, argc, log_path);
-	}	else { // externe commandos
+  } 
+	else if (!strcmp(argvec[0], "cd")) {
+    if (handle_cd(argvec, argc, process_env) == -1) {
+			perror("cd");
+		}
+		else {
+			success = 1;
+		}
+  } 
+	else if(!strcmp(argvec[0], "umask")) {
+    handle_umask(argvec, argc, socket_out, process_env);
+		success = 1;
+  } 
+	else if(!strcmp(argvec[0], "setpath")) {
+    if (handle_setpath(argvec, argc, socket_out, process_env) == -1) {
+			perror("setpath");
+		}
+		else {
+			success = 1;
+		}
+  } 
+	else if(!strcmp(argvec[0], "info")) {
+    handle_info(start_time, socket_out);
+		success = 1;
+  } 
+	else if(!strcmp(argvec[0], "getprot")) {
+    handle_getprot(argvec, argc, log_path, socket_out);
+		success = 1;
+  } 
+	else { // externe commandos
 
     switch(pid = fork()) {
       case -1:
-        perror("fork");
+        fprintf(socket_out, "fork %s\n", strerror(errno));
         break;
       case 0:
-        reset_signal();
+				/* duplicate socket on stdout and stderr */
+        dup2( fileno(socket_in), STDIN_FILENO );
+        dup2( fileno(socket_out), STDOUT_FILENO );
+        dup2( fileno(socket_out), STDERR_FILENO );
+        close(fileno(socket_out));
+
+        // set the umask with the current value in the thread
+        umask(process_env->umask);
+
+        // set the current working dir with the current value in the thread
+        if(fchdir(process_env->pwd_fd) == -1) {
+          fprintf(socket_out, "fchdir %s\n", strerror(errno));
+          exit(1);
+        }
+
+        // set the PATH variable with the current value in the thread
+        if(setenv("PATH", process_env->path, 1) == -1) {
+          fprintf(socket_out, "setenv %s\n", strerror(errno));
+          exit(1);
+        }
+
         execvp(argvec[0], argvec);
-        perror(argvec[0]);
+        fprintf(socket_out, "%s %s\n", argvec[0], strerror(errno));
+        fflush(socket_out);
         exit(1);
         break;
       default:
-        if(background == 1) {
+        if (background == 1) {
           signal(SIGCHLD, clean_up_child_process);
-          printf("running %s in background [%d]\n", argvec[0], pid);
-        } else {
+          fprintf(socket_out, "running %s in background [%d]\n", argvec[0], pid);
+					fflush(socket_out);
+        } 
+				else {
           signal(SIGCHLD, SIG_DFL);
           waitpid(pid,&status,0);
+					if (!status) {
+						success = 1;
+					}
         }
     }
 	}
-	
-	pthread_mutex_lock(&mutex);
-	if((log_fd = open(log_path, O_RDWR|O_APPEND)) == -1) {
-		perror("open log");
-		fflush(stdout);
-		exit(1);
-	}
+	if (success) {	
+		pthread_mutex_lock(&mutex);
+		if((log_fd = open(log_path, O_RDWR|O_APPEND)) == -1) {
+			//perror("open log");
+			//fflush(stdout);
+			exit(1);
+		}
 
-	/*if(get_ipv4(client_fd, ipv4) == -1) {
-		printf("Cannot convert IPv4 address!\n");
-		fflush(stdout);
+		
+		for(i = 0; i < argc; i++) {
+			write(log_fd, ipv4, strlen(ipv4));
+			write(log_fd, ":", 1);
+			write(log_fd, argvec[i], strlen(argvec[i]));
+			write(log_fd, " ", 1);
+		}
+		write(log_fd, "\n", 1);
+		close(log_fd);
+		pthread_mutex_unlock(&mutex);
 	}
-	*/
-	for(i = 0; i < argc; i++) {
-		//write(log_fd, ipv4, strlen(ipv4));
-		//write(log_fd, ":", 1);
-		write(log_fd, argvec[i], strlen(argvec[i]));
-		write(log_fd, " ", 1);
-	}
-	write(log_fd, "\n", 1);
-	close(log_fd);
-	pthread_mutex_unlock(&mutex);
   return 0;
 }
 
@@ -266,46 +303,33 @@ void get_commands(char *cmdline, char **argvec, int *argc) {
     ;
 }
 
-int read_input_s(char *cmdline, int fd) {
-  int rdbytes;
-	//printf("entered read: fd %d!\n", fd);
-	//printf("cmdline sz: %d\n", strlen(cmdline));
-  if ((rdbytes = read(fd, cmdline, MAXCMDLINE-1)) > 0) { // lest eine Zeile
-    cmdline[rdbytes] = 0;
-    if (strlen(cmdline) >= 2) {
-      if(cmdline[strlen(cmdline)-2] == '\r') {
-        cmdline[strlen(cmdline)-2] = '\0';
-      }
-    } else if (strlen(cmdline) > 1) {
-      cmdline[strlen(cmdline)-1] = '\0'; // das \n am Ende entfernen
-    }
-    return 0;
-  }
-
-  return -1;
+void read_input(FILE *socket_in, char *cmdline) {
+	if (fgets(cmdline, MAXCMDLINE, socket_in)) {
+		if (strlen(cmdline) >= 2) {
+			if (cmdline[strlen(cmdline)-2] == '\r') {
+				cmdline[strlen(cmdline)-2] = '\0';
+			}
+		}
+		else if (strlen(cmdline) > 1) {
+			cmdline[strlen(cmdline)-1] = '\0';
+		}
+	}
 }
 
-int show_prompt_socket(int fd, struct utsname uname_data, char *pwd) {
-  char prompt[1024];
-  bzero(prompt, sizeof(prompt));
-  //sprintf(prompt, "%s:%s $ ", uname_data.nodename, pwd);
-	printf("%s:%s $ ", uname_data.nodename, pwd);
-	fflush(stdout);
-  //if(write(fd, prompt, sizeof(prompt)) != sizeof(prompt)) {
-    //return -1;
-  //}
-  return 0;
+void show_prompt(FILE *socket_out, char *pwd) {
+	fprintf(socket_out, "[%s@%s] in %s -> ", user_name == NULL ? "user" : user_name, uname_data.nodename, pwd);
+	fflush(socket_out);
 }
 
-void handle_getprot(char **argvec, int argc, char *log_path) {
+int handle_getprot(char **argvec, int argc, char *log_path, FILE *socket_out) {
 	FILE *log;
 	char line[256];
 	int i = 0, n;
 	int skip;	
 
 	if(argc<2 || argc>2) {
-		fprintf(stderr, "getprot: wrong number of arguments!\n");
-		return;
+		fprintf(socket_out, "getprot: wrong number of arguments!\n");
+		return -1;
 	}
 
 	n = strtol(argvec[1], NULL, 10);
@@ -328,64 +352,75 @@ void handle_getprot(char **argvec, int argc, char *log_path) {
 		} 
 	}
 	pthread_mutex_unlock(&mutex);
+	return 0;
 } 
 
-void handle_cd(char **argvec, const unsigned argc, char *workdir) {
-  if(argc >= 2) {
-    if (chdir(argvec[1]) == -1) {
-      perror("cd");
-    }
-  } else {
-    if (chdir(getenv("HOME")) == -1) {
-      perror("cd");
-    }
-  }
-  getcwd(workdir, sizeof(MAXPATHNAME));
+int handle_cd(char **argvec, const unsigned argc, process_env_t *process_env) {
+	int tmp_fd;
+	int MAXSIZE = 0xFFF;
+	char proclnk[0xFFF];
+	char filename[0xFFF];
+	ssize_t r;
+
+	if (argc >= 2) {
+		if ((tmp_fd = openat(process_env->pwd_fd, argvec[1], O_DIRECTORY)) == -1) {
+			return -1;
+		}
+		close(process_env->pwd_fd);
+		process_env->pwd_fd = tmp_fd;
+	}
+	else {
+		if((tmp_fd = openat(process_env->pwd_fd, getenv("HOME"), O_DIRECTORY)) == -1) {
+			return -1;
+		}
+		strcpy(process_env->pwd, getenv("HOME"));
+		close(process_env->pwd_fd);
+		process_env->pwd_fd = tmp_fd;
+	}
+
+	// get filename of fd
+	sprintf(proclnk, "/proc/self/fd/%d", process_env->pwd_fd);
+	r = readlink(proclnk, filename, MAXSIZE);
+	if (r < 0) {
+		printf("failed to readlink\n");
+		return -1;
+	}
+	filename[r] = '\0';
+	strcpy(process_env->pwd, filename);
+	return 0;
 }
 
-void handle_umask(char **argvec, const unsigned argc) {
-  int umask_value;
-  mode_t prev_umask;
+int handle_umask(char **argvec, const unsigned argc, FILE *socket_out, process_env_t *process_env) {
 
   if(argc >= 2) {
-    umask_value = strtol(argvec[1], NULL, 8);
-    umask(umask_value);
-    prev_umask = umask(0);
-    printf("%04o\n", prev_umask);
-  } else {
-    prev_umask = umask(0);
-    printf("%04o\n", prev_umask);
+		process_env->umask = strtol(argvec[1], NULL, 8); 
   }
-
-  umask(prev_umask);
+	fprintf(socket_out, "%04o\n", process_env->umask);
+	fflush(socket_out);
+	return 0;
 }
 
-void handle_setpath(char **argvec, const unsigned argc) {
-  char *path;
-  if(argc >= 2) {
-    path = getenv("PATH");
-    if(path != NULL) {
-      strcat(path, ":");
-      strcat(path, argvec[1]);
-      if (setenv("PATH", path, 1) == -1) {
-        perror("setenv");
-      }
-    } else {
-      if (setenv("PATH", argvec[1], 1) == -1) {
-        perror("setenv");
-      }
-    }
-  } else {
-    printf("%s\n", getenv("PATH"));
+int handle_setpath(char **argvec, const unsigned argc, FILE *socket_out, process_env_t *process_env) {
+  if (argc >= 2) {
+		if (process_env->path != NULL && (sizeof(process_env->path) > (strlen(argvec[1])+2))) {
+			strcat(process_env->path, ":");
+			strcat(process_env->path, argvec[1]);
+		}
   }
+	else {
+		fprintf(socket_out, "%s\n", process_env->path);
+		fflush(socket_out);
+	}
+	return 0;
 }
 
-void handle_info(time_t start_time) {
+int handle_info(time_t start_time, FILE *socket_out) {
   struct tm *timeinfo;
   timeinfo = localtime( &start_time );
 
-  printf("Shell von: Berger, is151002\nPID: %d\nLäuft seit: %s\n", getpid(), asctime(timeinfo));
-  fflush(stdout);
+  fprintf(socket_out, "Shell von: Berger, is151002\nPID: %d\nLäuft seit: %s\n", getpid(), asctime(timeinfo));
+  fflush(socket_out);
+	return 0;
 }
 
 void signal_handler(int sig) {

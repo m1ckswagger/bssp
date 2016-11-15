@@ -29,82 +29,37 @@
 
 void signal_handler(int sig);
 void reset_signal();
-void handle_umask(char **argvec, const unsigned argc);
-void handle_setpath(char **argvec, const unsigned argc);
-void handle_info(time_t start_time);
+int handle_umask(char **argvec, const unsigned argc);
+int handle_setpath(char **argvec, const unsigned argc);
+int handle_info(time_t start_time);
 void clean_up_child_process();
-void handle_cd(char **argvec, const unsigned argc);
+int handle_cd(char **argvec, const unsigned argc);
 void show_prompt();
 int show_prompt_socket(int fd);
-void handle_getprot(char **argvec, int argc, char *log_path); 
+int handle_getprot(char **argvec, int argc, char *log_path); 
 int handle_client(int fd);
 int read_input_s(char *cmdline, int fd);
 void read_input(char *cmdline);
 void get_commands(char *cmdline, char **argvec, int *argc);
 int is_background(char **argvec, int argc);
 void start_shellserver();
-int handle_commands(char **argvec, int argc, time_t start_time, int background, int client_fd);
+int handle_commands(char **argvec, int argc, time_t start_time, int background, int client_fd, char *ipv4);
 
 char pwd[MAXPATHNAME];
 char *user_name;
 struct utsname uname_data;
 static sem_t *sem;
+time_t start_time;
 
 int main(int argc, char **argv) {
 
-  char cmdline[MAXCMDLINE];
-  char *argvec[MAXARGS];
-  int i, ss_pid;
-	//int background;
-
-  // set start time
-  time_t start_time;
   time(&start_time);
 
   getcwd(pwd, sizeof(pwd));
   user_name = getlogin();
   uname(&uname_data);
 
-  // start shellsever
-  switch(ss_pid = fork()) {
-    case -1:
-      perror("fork");
-      break;
-    case 0:
-      start_shellserver();
-      exit(1);
-    default:
-		exit(1);		// beendet lokale shell
-      break;
-  }
-
-  signal(SIGINT, signal_handler);
-  signal(SIGQUIT, signal_handler);
-
-  for(;;) {
-
-    //background = 1; // true
-
-    // Prompt
-    show_prompt();
-    read_input(cmdline);
-
-    // show prompt when \n was pressed
-    if (!strcmp(cmdline, "\n" )) {
-      continue;
-    }
-
-    // Commandozeile in Worte Zerlegen und expandieren
-    get_commands(cmdline, argvec, &i);
-
-    // is background ?
-    //background = is_background(argvec, i);
-
-    // shell interne behandeln und durchführen
-    //if(handle_commands(argvec, i, start_time, background) == 1) {
-      return 0;
-    //}
-  }
+  start_shellserver();
 
   return 0;
 }
@@ -155,7 +110,10 @@ void start_shellserver() {
       case 0:
         dup2( clientfd, STDOUT_FILENO );  /* duplicate socket on stdout */
         dup2( clientfd, STDERR_FILENO );
+        dup2( clientfd, STDIN_FILENO );
         handle_client(clientfd);
+				close(sock);
+				close(clientfd);
         exit(1);
         break;
       default:
@@ -197,8 +155,14 @@ int handle_client(int fd) {
   char *argvec[MAXARGS];
   int i, background;
   time_t start_time;
+	char client_ip[20];
 
   time(&start_time);
+
+	if (get_ipv4(fd, client_ip) == -1) {
+		perror("get_ipv4");
+		return 1;
+	}
 
   for (;;) {
     if(show_prompt_socket(fd) == -1) {
@@ -219,7 +183,7 @@ int handle_client(int fd) {
 
     background = is_background(argvec, i);
 
-    if(handle_commands(argvec, i, start_time, background, fd) == 1) {
+    if(handle_commands(argvec, i, start_time, background, fd, client_ip) == 1) {
       return 0;
     }
 
@@ -228,27 +192,45 @@ int handle_client(int fd) {
   return 0;
 }
 
-int handle_commands(char **argvec, int argc, time_t start_time, int background, int client_fd) {
+int handle_commands(char **argvec, int argc, time_t start_time, int background, int client_fd, char *ipv4) {
   int pid, status;
 	int i;
 	int log_fd;
 	char log_path[] = "/var/log/is151002";
-	char ipv4[20];
+	int success = 0;
 	
   if (!strcmp(argvec[0], "exit")) {
     printf("bye, bye\n");
     return 1;
-  } else if (!strcmp(argvec[0], "cd")) {
-    handle_cd(argvec, argc);
-  } else if(!strcmp(argvec[0], "umask")) {
+  } 
+	else if (!strcmp(argvec[0], "cd")) {
+    if (handle_cd(argvec, argc) == -1) {
+			perror("cd");
+		}
+		else {
+			success = 1;
+		}
+  } 
+	else if(!strcmp(argvec[0], "umask")) {
     handle_umask(argvec, argc);
-  } else if(!strcmp(argvec[0], "setpath")) {
-    handle_setpath(argvec, argc);
-  } else if(!strcmp(argvec[0], "info")) {
+		success = 1;
+  } 
+	else if(!strcmp(argvec[0], "setpath")) {
+    if (handle_setpath(argvec, argc) == -1) {
+			perror("setpath");
+		}
+		else {
+			success = 1;
+		}
+  } 
+	else if(!strcmp(argvec[0], "info")) {
     handle_info(start_time);
-  } else if(!strcmp(argvec[0], "getprot")) {
+		success = 1;
+  } 
+	else if(!strcmp(argvec[0], "getprot")) {
     handle_getprot(argvec, argc, log_path);
-  } else { // externe commandos
+  } 
+	else { // externe commandos
 
     switch(pid = fork()) {
       case -1:
@@ -261,38 +243,39 @@ int handle_commands(char **argvec, int argc, time_t start_time, int background, 
         exit(1);
         break;
       default:
-        if(background == 1) {
+        if (background == 1) {
           signal(SIGCHLD, clean_up_child_process);
           printf("running %s in background [%d]\n", argvec[0], pid);
-        } else {
+					fflush(stdout);
+        } 
+				else {
           signal(SIGCHLD, SIG_DFL);
           waitpid(pid,&status,0);
+					if (!status) {
+						success = 1;
+					}
         }
     }
 	}
 
-	sem_wait(sem);
-	if((log_fd = open(log_path, O_RDWR|O_APPEND)) == -1) {
-		perror("open log");
-		fflush(stdout);
-		exit(1);
-	}
+	if (success) {
+		sem_wait(sem);
+		if((log_fd = open(log_path, O_RDWR|O_APPEND)) == -1) {
+			perror("open log");
+			fflush(stdout);
+			exit(1);
+		}
 
-	/*
-	if(get_ipv4(client_fd, ipv4) == -1) {
-		printf("Cannot convert IPv4 address!\n");
-		fflush(stdout);
+		for(i = 0; i < argc; i++) {
+			write(log_fd, ipv4, strlen(ipv4));
+			write(log_fd, ":", 1);
+			write(log_fd, argvec[i], strlen(argvec[i]));
+			write(log_fd, " ", 1);
+		}
+		write(log_fd, "\n", 1);
+		sem_post(sem);
+		close(log_fd);
 	}
-	*/
-	for(i = 0; i < argc; i++) {
-		//write(log_fd, ipv4, strlen(ipv4));
-		//write(log_fd, ":", 1);
-		write(log_fd, argvec[i], strlen(argvec[i]));
-		write(log_fd, " ", 1);
-	}
-	write(log_fd, "\n", 1);
-	sem_post(sem);
-	close(log_fd);
   return 0;
 }
 
@@ -318,14 +301,6 @@ int read_input_s(char *cmdline, int fd) {
   return -1;
 }
 
-void read_input(char *cmdline) {
-  if (fgets(cmdline, MAXCMDLINE, stdin)) { // lest eine Zeile
-    if(strlen(cmdline) > 1) {
-      cmdline[strlen(cmdline)-1] = '\0'; // das \n am Ende entfernen
-    }
-  }
-}
-
 void show_prompt() {
   printf("[%s@%s] in %s -> ", user_name == NULL ? "user" : user_name, uname_data.nodename, pwd);
 }
@@ -340,7 +315,7 @@ int show_prompt_socket(int fd) {
   return 0;
 }
 
-void handle_getprot(char **argvec, int argc, char *log_path) {
+int handle_getprot(char **argvec, int argc, char *log_path) {
   FILE *log;
   char line[256];
   int i = 0, n;
@@ -348,7 +323,7 @@ void handle_getprot(char **argvec, int argc, char *log_path) {
 
   if(argc<2 || argc>2) {
     fprintf(stderr, "getprot: wrong number of arguments!\n");
-    return;
+    return -1;
   }
 
 	sem_wait(sem);
@@ -371,22 +346,27 @@ void handle_getprot(char **argvec, int argc, char *log_path) {
   }
 	fflush(stdout);
 	sem_post(sem);
+	return 0;
 }
 
-void handle_cd(char **argvec, const unsigned argc) {
+int handle_cd(char **argvec, const unsigned argc) {
   if(argc >= 2) {
     if (chdir(argvec[1]) == -1) {
       perror("cd");
+			return -1;
     }
-  } else {
+  } 
+	else {
     if (chdir(getenv("HOME")) == -1) {
       perror("cd");
+			return -1;
     }
   }
   getcwd(pwd, sizeof(pwd));
+	return 0;
 }
 
-void handle_umask(char **argvec, const unsigned argc) {
+int handle_umask(char **argvec, const unsigned argc) {
   int umask_value;
   mode_t prev_umask;
 
@@ -401,9 +381,10 @@ void handle_umask(char **argvec, const unsigned argc) {
   }
 
   umask(prev_umask);
+	return 0;
 }
 
-void handle_setpath(char **argvec, const unsigned argc) {
+int handle_setpath(char **argvec, const unsigned argc) {
   char *path;
   if(argc >= 2) {
     path = getenv("PATH");
@@ -412,23 +393,28 @@ void handle_setpath(char **argvec, const unsigned argc) {
       strcat(path, argvec[1]);
       if (setenv("PATH", path, 1) == -1) {
         perror("setenv");
+				return -1;
       }
     } else {
       if (setenv("PATH", argvec[1], 1) == -1) {
         perror("setenv");
+				return -1;
       }
     }
   } else {
     printf("%s\n", getenv("PATH"));
+		fflush(stdout);
   }
+	return 0;
 }
 
-void handle_info(time_t start_time) {
+int handle_info(time_t start_time) {
   struct tm *timeinfo;
   timeinfo = localtime( &start_time );
 
   printf("Shell von: Berger, is151002\nPID: %d\nLäuft seit: %s\n", getpid(), asctime(timeinfo));
   fflush(stdout);
+	return 0;
 }
 
 void signal_handler(int sig) {
