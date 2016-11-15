@@ -1,5 +1,3 @@
-// Socketserver
-
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -12,24 +10,53 @@
 #include <unistd.h>
 
 #include <pthread.h>
+#include "mychat.h"
+#include "rawio.h"
 
-#define BUFSZ 1024
-#define SRV_PORT 4002
+#define BUFFER_SIZE 1024
 #define MAX_USR_NAME 32
 
-void *recieve_message(void *socket) {
-	int sock_fd, anzbytes;
-	char buf[BUFSZ];
-	int *tmp = (int*) socket;
+pthread_mutex_t screen = PTHREAD_MUTEX_INITIALIZER;
 
-	sock_fd = *tmp;
+int term_lines;
+int term_cols;
 
-	memset(buf, 0, BUFSZ);
+typedef struct data {
+	int fd;
+	int current_term_lines;
+} data_t;
+
+void *recieve_message(void *arg) {
+	char buf[BUFFER_SIZE];
+	data_t *data;
+	data  = (data_t*) arg;
+	int rdbytes;
+	int line=1;
+
 	
-	for(;;) {
-		anzbytes = read(sock_fd, buf, BUFSZ);
-		write(1, buf, anzbytes);
+	while ((rdbytes = read(data->fd, buf, BUFFER_SIZE-1)) > 0) {
+		//memset(buf, 0, BUFFER_SIZE);
+		buf[rdbytes] = 0;
+		pthread_mutex_lock(&screen);
+		writestr_raw(buf, 0, line);
+		if (line == (term_lines-1)) {
+			scroll_up(0, data->current_term_lines);
+			line--;
+		}
+		else {
+			line++;
+		}
+		pthread_mutex_unlock(&screen);
 	}
+	return NULL;
+}
+
+int send_message(int fd, char *message) {
+	size_t len = strlen(message) + 1;
+	if (write(fd, message, len) != len) {
+		return -1;
+	}
+	return 0;
 }
 
 int main(int argc, char **argv)
@@ -39,9 +66,8 @@ int main(int argc, char **argv)
 	pthread_t thr_id;
 	char *srv_addr;
 	char username[MAX_USR_NAME+1];
-	char buf[BUFSZ];
+	char buf[BUFFER_SIZE];
 	struct sockaddr_in client_sock;
-
 
 	if(argc != 3) {
 		printf("usage: client <ip address> <username>\n");
@@ -86,16 +112,42 @@ int main(int argc, char **argv)
 	write(sock_fd, username, strlen(username)+1); 	
 	printf("connected to %s:%d as %s\n", srv_addr, SRV_PORT, username);
 
-	memset(buf, 0, BUFSZ);
-	printf("Enter message:\n");
-
+	memset(buf, 0, BUFFER_SIZE);
 	err = pthread_create(&thr_id, NULL, recieve_message, (void*) &sock_fd);
 	if (err) {
 		printf("Threaderzeugung: %s\n", strerror(err));
 	}
-	while(fgets(buf, BUFSZ, stdin) != NULL)
-		write(sock_fd, buf, BUFSZ-1);
 
+	// Send
+	printf("Current Term lines: %d\n", term_lines);
+	//sleep(5);
+	clearscr();
+	term_cols = get_cols();
+	term_lines = get_lines();
+	for (;;) {
+		int i;
+		pthread_mutex_lock(&screen);
+		writestr_raw("Say something: ", 0, term_lines-1);
+		pthread_mutex_unlock(&screen);
+		
+		gets_raw(buf, BUFFER_SIZE, strlen("Say something: "), term_lines);
+		
+		pthread_mutex_lock(&screen);
+		writestr_raw("Say something: ", 0, term_lines-1);
+		pthread_mutex_unlock(&screen);
+		
+		for (i = 0; i < term_cols; i++) {
+			writestr_raw(" ", i, term_lines-1);
+		}
+
+		if (!strcmp(buf, "/quit")) {
+			break;
+		}
+		if (strlen(buf) > 0 && send_message(sock_fd, buf) == -1) {
+			fprintf(stderr, "could not end message \n");
+			break;
+		}
+	}
 	close(sock_fd);
 	pthread_exit(NULL);
 

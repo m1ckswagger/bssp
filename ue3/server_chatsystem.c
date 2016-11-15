@@ -11,15 +11,19 @@
 #include <unistd.h>
 
 #include <pthread.h>
+#include "mychat.h"
 
-#define BUFSZ 1024
-#define SRV_PORT 4002
+#define BUFFER_SIZE 1024
 #define MAX_USR_NAME 32
-#define MAX_USRS 20
+#define MAX_USRS 5
 
-char users[MAX_USRS][MAX_USR_NAME];
-int users_fd[MAX_USRS];
-pid_t thr_ids[MAX_USRS];
+typedef struct chat_client {
+	char username[MAX_USR_NAME];
+	int fd;
+	pid_t tid;
+} chat_client_t;
+
+chat_client_t clients[MAX_USRS];
 int usercount = 0;
 pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 
@@ -28,114 +32,165 @@ struct client_handler_params {
 	char username[MAX_USR_NAME];
 };
 
-int contains_user(char *username) {
+void show_client_list() {
 	int i;
+	pthread_mutex_lock(&mutex);
+	for (i = 0; i<MAX_USRS; i++) {
+		if (clients[i].fd != 0)
+			printf("Username: %s FD: %d TID: %d\n", clients[i].username, clients[i].fd, clients[i].tid);
+	}
+	pthread_mutex_unlock(&mutex);
+}
+
+int contains_user(chat_client_t *client) {
+	int i;
+	pthread_mutex_lock(&mutex);
 	for(i = 0; i < MAX_USRS; i++) {
 		// wenn user enthalten return 1
-		if(!strcmp(users[i], username))
+		if(!strcmp(client->username, clients[i].username) && clients[i].fd!=0) {
+			pthread_mutex_unlock(&mutex);
 			return 1;
+		}
 	}
+	pthread_mutex_unlock(&mutex);
 	return 0;
 }
 
 
 // Liefert bei Erfolg den Index an dem der Benutzer
 // eingefügt wurde
-int add_user(char *username, int fd, pid_t tid) {
+int add_user(chat_client_t *client) {
 	int i;
+	pthread_mutex_lock(&mutex);
 	for(i = 0; i < MAX_USRS; i++) {
-		if(!strcmp(users[i], "\0")) {
-			strcpy(users[i], username);
-			//users[i] = username;
-			users_fd[i] = fd;
-			thr_ids[i] = tid;
+		if (clients[i].fd == 0) {
+			clients[i].fd = client->fd;
+			clients[i].tid = client->tid;
+			strcpy(clients[i].username, client->username);
+			usercount++;
+			pthread_mutex_unlock(&mutex);
 			return i;
 		}
 	}
+	pthread_mutex_unlock(&mutex);
 	return -1;
 }
 
-void message_all_clients(char *message, char* username) {
-	int i;
-	for(i = 0; i < MAX_USRS; i++) {
-		// wenn benutzer nicht \0
-		if(strcmp(users[i], "\0")) {
-			write(users_fd[i], username, strlen(username));
-			write(users_fd[i], ": ", 2);
-			write(users_fd[i], message, strlen(message));
-		}
-	}
+int receive_until_null_or_linefeed(int target_fd, char *buffer, int buffer_size) {
+
+  int rdbytes = 0;
+  char currentByte;
+
+  // weil -1 ist fehler und 0 ist EOF z.B. oder connection terminiert.
+  while ((recv(target_fd, &currentByte, 1, MSG_WAITALL) > 0) && (rdbytes < buffer_size)) {
+    if (currentByte == '\0') {
+      buffer[rdbytes] = '\0';
+      return rdbytes;
+    } else if (currentByte == '\n') {
+      buffer[rdbytes] = '\0';
+      return rdbytes + 1;
+    } else {
+      buffer[rdbytes] = currentByte;
+      rdbytes++;
+    }
+  }
+  return rdbytes;
 }
 
-char *get_username_by_tid(pid_t tid, char *username) {
+void message_all_clients(char *message, chat_client_t *client) {
 	int i;
-
-	for(i = 0; i < MAX_USRS; i++) {
-		if(tid == thr_ids[i]) {
-			strcpy(username, users[i]);
-			return users[i];
+	show_client_list();
+	pthread_mutex_lock(&mutex);
+	
+	for (i = 0; i < MAX_USRS; i++) {
+		// wenn fd nicht verwendet
+		if (clients[i].fd != 0) {
+			//printf("User %s writing %s\n", client->username, clients[i].username);
+			write(clients[i].fd, client->username, strlen(client->username));
+			write(clients[i].fd, ": ", 2);
+			write(clients[i].fd, message, strlen(message)+1);
 		}
 	}
-	return "";
+	pthread_mutex_unlock(&mutex);
 }
 
 void *client_handler(void *args)
 {
 	struct client_handler_params *params = args;
-	int anzbytes;
+	int rdbytes;
 	int index = 0;			// Index an dem der Benutzer gespeichert ist
-	char usrn[MAX_USR_NAME];
-	char buf[BUFSZ];
+	chat_client_t client;
+	char message[BUFFER_SIZE];
 	char user_taken[] = "Username already in use!";
 	char user_limit_exceeded[] = "User limit exceeded! Try again later.";	
 	pid_t tid = syscall(__NR_gettid);
 
+	client.fd = params->fd;
+	client.tid = tid;
+	strcpy(client.username, params->username);
+	
 	// Client in Liste hinzufügen
-	pthread_mutex_lock(&mutex);
 	if(usercount) {
 		// wenn username bereits verwendet -> Fehlermeldung
-		if(contains_user(params->username)) {
-			write(params->fd, user_taken, sizeof(user_taken));
+		if(contains_user(&client)) {
+			write(client.fd, user_taken, sizeof(user_taken));
 			return NULL;
 		}
 
 		if(usercount > MAX_USRS) {
-			write(params->fd, user_limit_exceeded, sizeof(user_limit_exceeded));
+			write(client.fd, user_limit_exceeded, sizeof(user_limit_exceeded));
+			return NULL;
 		}
 	}
-	else {
-		memset(users, 0, MAX_USRS*MAX_USR_NAME);
-	}
-	tid = syscall(__NR_gettid);
-	if((index = add_user(params->username, params->fd, tid)) == -1) {
+	if((index = add_user(&client)) == -1) {
 		printf("Fehler beim Speichern des Benutzers in der Liste!\n");
 	}
 	else {
-		printf("Added user %s on index %d\n", params->username, index);
-		usercount++;
+		printf("Added user %s (fd=%d) on index %d\n", clients[index].username, clients[index].fd, index);
 	}
 	pthread_mutex_unlock(&mutex);
 	
+	show_client_list();
 	// Client Nachrichten verwalten
-	while ( (anzbytes=read(params->fd,buf,BUFSZ-1)) > 0 )
-	{
-		buf[anzbytes] = 0;
+	/*while ( (rdbytes = read(client.fd, message, BUFFER_SIZE)) > 0 )
+	{*/
+	for (;;) {
+		rdbytes = receive_until_null_or_linefeed(client.fd, message, BUFFER_SIZE);
+		if (rdbytes == -1) {
+			fprintf(stderr, "Error in Receive from Client!\n");
+			break;
+		}
+		if (rdbytes == 0) {
+			printf("SERVER-Info: Client %s closed the connection!\n", client.username);
+			break;
+		}	
+		printf("Read %d bytes from Client %s\n", rdbytes,  client.username);
 		
 		// alle Clients benachrichtigen
 		pthread_mutex_lock(&mutex);
-		tid = syscall(__NR_gettid);
-		get_username_by_tid(tid, usrn);
-		printf("Thread working: %d\n", tid);
-		printf("Client (%s) sagt: %s\n", usrn, buf);
-		message_all_clients(buf, usrn);
+		printf("Thread working: %d\n", client.tid);
+		printf("Client (%s) sagt: %s\n", client.username, message);
 		pthread_mutex_unlock(&mutex);
+		message_all_clients(message, &client);
 			
 	}
 	// Client aus der Liste Löschen
-	strcpy(users[index], "\0");
+	pthread_mutex_lock(&mutex);
+	printf("Removing Client %s from the list\n", client.username);
+	close(client.fd);
+	clients[index].fd = 0;
+	usercount--;
+	pthread_mutex_unlock(&mutex);
+	
 	return NULL;
 }
 
+void init_clients() {
+	int i;
+	for (i = 0; i<MAX_USRS; i++) {
+		clients[i].fd = 0;
+	}
+}
 
 int main()
 {
@@ -170,6 +225,7 @@ int main()
 		perror("listen"); 
 		exit(1);
 	}
+	init_clients();
 	printf("Server running on %d\n", SRV_PORT);
 	for (;;)
 	{

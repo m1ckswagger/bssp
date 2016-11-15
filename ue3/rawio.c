@@ -12,11 +12,14 @@
 #include <unistd.h>
 #include <pthread.h>
 
+void clearscr();
+
 static char terminf_entry[1024];
 static char platz_fuer_termstrings[1024];
 static char *p=platz_fuer_termstrings;
 static char *Cl, *Cpos, *Scroll, *SetScrollRegion; 
 static int nrlines;
+static int nrcols;
 
 static int isinit;
 static struct termios told;
@@ -58,6 +61,9 @@ static void init()
 		fprintf(stderr, "failed to get scroll seq for terminaltype %s\n", getenv("TERM")), exit(1);
 	if (( nrlines = tgetnum("li")) == -1)
 		fprintf(stderr, "failed to get line-size for terminaltype %s\n", getenv("TERM")), exit(1);
+	if (( nrcols = tgetnum("co")) == -1)
+		fprintf(stderr, "failed to get line-size for terminaltype %s\n", getenv("TERM")), exit(1);
+
 
 	atexit(exithandler);
 
@@ -121,6 +127,12 @@ int get_lines()
 	return nrlines;
 }
 
+int get_cols()
+{
+	if (!isinit)
+		init();
+	return nrcols;
+}
 
 void clearscr()
 {

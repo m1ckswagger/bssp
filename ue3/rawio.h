@@ -13,5 +13,8 @@ void scroll_up(int from_line, int to_line);
 // liefert Anzahl Zeilen des Terminals [ beim Initialisieren!! ]
 int get_lines();
 
+// liefert Anzahl Spalten des Terminals [ beim Initialisieren!! ]
+int get_cols();
+
 // Loescht Bildschirm
 void clearscr();
